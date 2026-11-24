@@ -1,0 +1,17 @@
+{
+  "name": "pi-privacy-screen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Keeps secrets and personal data out of what the Pi coding agent sends to a model provider.",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "e2e": "node test/e2e/run.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

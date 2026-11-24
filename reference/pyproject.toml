@@ -1,0 +1,25 @@
+# Optional. Only for comparing opf-mlx with the original PyTorch implementation.
+# Nothing in opf-mlx itself imports from here, and running opf-mlx does not need it.
+#
+#   uv run --project reference pytest                  the whole suite, including tests/test_parity.py,
+#                                                      which runs the two implementations side by side
+#   uv run --project reference python reference/make_golden.py
+#                                                      record reference outputs for the main test suite
+[project]
+name = "opf-mlx-reference"
+version = "0"
+description = "PyTorch reference environment for validating opf-mlx."
+requires-python = ">=3.11"
+dependencies = [
+  "opf-mlx",
+  # The reference implementation, pinned to the commit the port was written against.
+  "opf @ git+https://github.com/openai/privacy-filter@f7f00ca7fb869683eb732c010299d901457f19c3",
+  "torch>=2.6",
+  "pytest>=8",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+opf-mlx = { path = "..", editable = true }
