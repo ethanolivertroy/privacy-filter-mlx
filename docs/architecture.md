@@ -1,65 +1,63 @@
-# OpenAI Privacy Filter: architecture note
+# OpenAI Privacy Filter: Architecture Notes
 
-Everything here was read from the original artifacts, not inferred from names
-or from similar models.
+Every detail in this document was verified directly against the upstream source code and checkpoint files rather than inferred from naming conventions or related models.
 
 | Artifact | Pinned at | Used for |
 |---|---|---|
-| `github.com/openai/privacy-filter` | commit `f7f00ca7fb869683eb732c010299d901457f19c3` | model, runtime, decoding source (`opf/_model`, `opf/_core`, `opf/_common/label_space.py`, `opf/_api.py`) |
+| `github.com/openai/privacy-filter` | commit `f7f00ca7fb869683eb732c010299d901457f19c3` | Model, runtime, and decoding source (`opf/_model`, `opf/_core`, `opf/_common/label_space.py`, `opf/_api.py`) |
 | `huggingface.co/openai/privacy-filter`, directory `original/` | revision `7ffa9a043d54d1be65afb281eddf0ffbe629385b` | `config.json`, `model.safetensors`, `viterbi_calibration.json` |
-| `original/model.safetensors` | 2,798,984,088 bytes, sha256 `9c262cbe68a0c8a50590a648ef8341a2b7d3be1fa11dfb79893fe0b03ce57b5c` | weights: 107 tensors, 1,399,486,832 parameters |
+| `original/model.safetensors` | 2,798,984,088 bytes, SHA-256 `9c262cbe68a0c8a50590a648ef8341a2b7d3be1fa11dfb79893fe0b03ce57b5c` | Weights: 107 tensors, 1,399,486,832 parameters |
 
-The parameter count computed from the module definitions equals the count in
-the safetensors header exactly, so no tensor is unexplained.
+The total parameter count derived from the module definitions matches the safetensors header exactly, accounting for every tensor in the checkpoint.
 
-Sections 1 to 15 describe the model, 16 and 17 this implementation of it.
-Sections 18 and 19 describe two things built on top that are not in the
-original: a local detection service, and a privacy screen for the Pi coding
-agent that uses it.
+- **Sections 1–15**: Specification of the upstream model and inference pipeline.
+- **Sections 16–17**: Design and benchmark/parity measurements for `opf-mlx`.
+- **Sections 18–19**: Two additions built on top of `opf-mlx` that are not part of the upstream repo: the local detection service (`opf-mlx serve`) and the Pi coding agent extension (`pi-privacy-screen`).
+
+---
 
 ## 1. Configuration (`original/config.json`)
 
 | Key | Value | Meaning |
 |---|---|---|
-| `num_hidden_layers` | 8 | transformer blocks |
-| `hidden_size` | 640 | residual stream width |
-| `vocab_size` | 200064 | embedding rows (tokenizer uses ids 0..200018) |
-| `num_attention_heads` / `num_key_value_heads` / `head_dim` | 14 / 2 / 64 | grouped-query attention, 7 query heads per KV head |
-| `bidirectional_left_context` / `_right_context` | 128 / 128 | attention band on each side |
-| `sliding_window` | 257 | total band including self; only validated, never used directly |
-| `num_experts` / `experts_per_token` / `intermediate_size` | 128 / 4 / 640 | mixture-of-experts feed-forward |
-| `rope_theta`, `rope_scaling_factor`, `rope_ntk_alpha`, `rope_ntk_beta`, `initial_context_length` | 150000, 32, 1, 32, 4096 | rotary position encoding |
-| `num_labels` | 33 | token classes |
-| `default_n_ctx` / `max_position_embeddings` | 128000 / 131072 | window length / initial RoPE table size |
-| `encoding` | `o200k_base` | tiktoken encoding |
-| `param_dtype` | `bfloat16` | storage and compute dtype of the weights |
+| `num_hidden_layers` | 8 | Number of transformer blocks |
+| `hidden_size` | 640 | Residual stream width |
+| `vocab_size` | 200064 | Embedding table rows (tokenizer IDs span `0..200018`) |
+| `num_attention_heads` / `num_key_value_heads` / `head_dim` | 14 / 2 / 64 | Grouped-query attention (7 query heads per KV head) |
+| `bidirectional_left_context` / `_right_context` | 128 / 128 | Attention band width on each side |
+| `sliding_window` | 257 | Total band width including self (`128 + 128 + 1`); validated only, never used directly |
+| `num_experts` / `experts_per_token` / `intermediate_size` | 128 / 4 / 640 | Mixture-of-Experts (MoE) feed-forward layer |
+| `rope_theta`, `rope_scaling_factor`, `rope_ntk_alpha`, `rope_ntk_beta`, `initial_context_length` | 150000, 32, 1, 32, 4096 | YaRN rotary position encoding parameters |
+| `num_labels` | 33 | Output token classes |
+| `default_n_ctx` / `max_position_embeddings` | 128000 / 131072 | Default GPU window length / initial RoPE table length |
+| `encoding` | `o200k_base` | `tiktoken` encoding name |
+| `param_dtype` | `bfloat16` | Storage and primary compute dtype of the weights |
 
-Not in the config, taken from code defaults: `swiglu_limit = 7.0`,
-`packed_geglu = False`, RMSNorm `eps = 1e-5`, SwiGLU `alpha = 1.702`.
+Additional hyperparameters are not stored in `config.json` and come from upstream code defaults: `swiglu_limit = 7.0`, `packed_geglu = False`, RMSNorm `eps = 1e-5`, and SwiGLU `alpha = 1.702`.
 
 ## 2. Checkpoint tensors
 
-All BF16 except `sinks` (F32). `n` is the block index 0..7.
+All tensors are stored in `bfloat16` except `sinks`, which is `float32`. `n` is the block index (`0..7`).
 
 | Name | Shape | Role |
 |---|---|---|
-| `embedding.weight` | [200064, 640] | token embedding |
-| `block.n.attn.norm.scale` | [640] | pre-attention RMSNorm |
-| `block.n.attn.qkv.weight`, `.bias` | [1152, 640], [1152] | fused q/k/v projection, `y = x Wᵀ + b`; 1152 = 64 × (14 + 2 + 2) |
-| `block.n.attn.sinks` | [14] | one attention-sink logit per query head, stored in log2 units |
-| `block.n.attn.out.weight`, `.bias` | [640, 896], [640] | attention output projection |
-| `block.n.mlp.norm.scale` | [640] | pre-MLP RMSNorm |
-| `block.n.mlp.gate.weight`, `.bias` | [128, 640], [128] | expert router |
-| `block.n.mlp.swiglu.weight`, `.bias` | [128, 640, 1280], [128, 1280] | expert layer 1, laid out [expert, in, out]: `y = x W[e] + b[e]` |
-| `block.n.mlp.out.weight`, `.bias` | [128, 640, 640], [128, 640] | expert layer 2, also [expert, in, out] |
-| `norm.scale` | [640] | final RMSNorm |
-| `unembedding.weight` | [33, 640] | classifier, no bias |
+| `embedding.weight` | `[200064, 640]` | Token embedding table |
+| `block.n.attn.norm.scale` | `[640]` | Pre-attention RMSNorm scale |
+| `block.n.attn.qkv.weight`, `.bias` | `[1152, 640]`, `[1152]` | Fused Q/K/V projection (`y = x Wᵀ + b`); `1152 = 64 × (14 + 2 + 2)` |
+| `block.n.attn.sinks` | `[14]` | Learned attention-sink logit per query head (stored in log2 units) |
+| `block.n.attn.out.weight`, `.bias` | `[640, 896]`, `[640]` | Attention output projection |
+| `block.n.mlp.norm.scale` | `[640]` | Pre-MLP RMSNorm scale |
+| `block.n.mlp.gate.weight`, `.bias` | `[128, 640]`, `[128]` | MoE expert router |
+| `block.n.mlp.swiglu.weight`, `.bias` | `[128, 640, 1280]`, `[128, 1280]` | Expert layer 1, layout `[expert, in, out]`: `y = x W[e] + b[e]` |
+| `block.n.mlp.out.weight`, `.bias` | `[128, 640, 640]`, `[128, 640]` | Expert layer 2, layout `[expert, in, out]` |
+| `norm.scale` | `[640]` | Final RMSNorm scale |
+| `unembedding.weight` | `[33, 640]` | Linear token classifier (no bias) |
 
 ## 3. Forward pass
 
-One window of `T` tokens, batch size 1 (what the reference runtime does).
+For a single window of `T` tokens with batch size 1 (matching the reference runtime):
 
-```
+```text
 ids                                                     [1, T]         int32
 x = embedding[ids]                                      [1, T, 640]
 
@@ -93,28 +91,18 @@ logp   = log_softmax(logits)                            [T, 33]
 
 ## 4. Attention behavior
 
-- **Bidirectional and banded on every layer.** Token `t` attends to tokens
-  `t-128 .. t+128` that exist in the window. There is no causal mask.
-- **Attention sink.** A learned per-head scalar joins the softmax as an extra
-  logit and is then discarded, so the weights over real tokens sum to less than
-  one. It is not a token and has no value vector. Because it is always finite,
-  the softmax is never over an empty set.
-- **Scaling.** Queries and keys are each scaled by `64^(-1/4)` after RoPE; there
-  is no separate `1/sqrt(d)` on the scores.
-- **Grouping.** Query heads 0..6 use KV head 0, heads 7..13 use KV head 1. The
-  sinks are indexed in the same order.
-- **Padding.** The reference can mask padded keys in a batch. Single-text
-  inference never pads.
-- **Receptive field.** Eight layers of ±128 give ±1024 tokens. Nothing else
-  mixes tokens, so the logits for token `t` depend only on tokens within 1024
-  positions of it.
+- **Bidirectional banded attention in every layer**: Token `t` attends to tokens `t - 128 .. t + 128` within the current window. There is no causal mask.
+- **Attention sink**: A learned per-head scalar is appended to the attention logits before softmax and discarded afterward, allowing the weights over real tokens to sum to less than 1. It is not a real token and has no value vector. Because the sink logit is always finite, the softmax denominator is never empty.
+- **Query/key scaling**: Queries and keys are each multiplied by `64^(-1/4)` after RoPE; no separate `1 / sqrt(d)` factor is applied to the dot products.
+- **Head grouping**: Query heads `0..6` attend to KV head `0`, and query heads `7..13` attend to KV head `1`. Sink scalars follow the same head ordering.
+- **Padding**: The upstream runtime supports masking padded keys in batched inference, though single-text inference never pads.
+- **Receptive field**: Eight layers of `±128` give a total receptive field of `±1024` tokens. Because no other operation mixes information across positions, the logits for token `t` depend strictly on tokens within 1,024 positions of it.
 
 ## 5. Position encoding
 
-Rotary embedding applied to queries and keys only, with YaRN-style frequency
-blending. With `d = 64`, pair index `i = 0..31`:
+Rotary position embeddings (RoPE) with YaRN frequency blending are applied to queries and keys only. With `d = 64` and pair index `i = 0..31`:
 
-```
+```text
 freq[i]   = 150000 ^ (2i / 64)
 low, high = 32 * ln(4096 / (32 * 2π)) / ln(150000),  32 * ln(4096 / (1 * 2π)) / ln(150000)
           = 8.0928, 17.3980
@@ -124,679 +112,429 @@ c         = 0.1 * ln(32) + 1 = 1.346574
 cos[p, i] = c * cos(p * inv[i]),   sin[p, i] = c * sin(p * inv[i])
 ```
 
-Pairs are interleaved: `(x[2i], x[2i+1])` rotates to
-`(x[2i] cos - x[2i+1] sin, x[2i+1] cos + x[2i] sin)`. The constant `c` multiplies
-both the sine and cosine tables, so it scales queries and keys, and the scores
-by `c²`. Pairs 0..8 keep their original frequency, pairs 18..31 are slowed by
-32, and pairs 9..17 blend. The same table serves every head. Position `p` is
-the index within the current window, starting at 0. The table is built for
-131072 positions and extended if a window is longer.
+Pairs are interleaved: `(x[2i], x[2i+1])` rotates to `(x[2i] cos - x[2i+1] sin, x[2i+1] cos + x[2i] sin)`. Because the YaRN concentration factor `c` is baked into both the `cos` and `sin` tables, it scales queries and keys by `c` and attention scores by `c²`. Pairs `0..8` keep their base frequency, pairs `18..31` are slowed by 32x, and pairs `9..17` interpolate between them. The same tables are shared across all heads. Position `p` starts at `0` in each window. Tables are initialized for 131,072 positions and extended on demand if a longer window is requested.
 
-The tables are float32 and are built on the CPU. The reference computes
-`freq[i]` with PyTorch's float32 `pow`. This port computes it in double
-precision and rounds once, because an error in a frequency grows with the
-position. On this machine PyTorch's result is one unit in the last place away
-from the correctly rounded value for 2 of the 32 frequencies, so the two tables
-differ by up to `1.2e-7 * p`: 4e-5 at position 4096 and 1.3e-3 at position
-131071. Attention only sees differences of angles between tokens at most 128
-apart, where this is 1.5e-5 of a radian at worst. It is not visible in the
-logits (section 17).
+### Floating-point details in the RoPE tables
 
-The angle `p * inv[i]` is formed in float32, as in the reference, so it is
-rounded more coarsely the larger it is: to 1.2e-4 of a radian between 2,048
-and 4,096 radians, to 4e-3 near 100,000. A text's scores therefore depend
-slightly on where it sits. Measured on the released model: the same 2,430
-tokens placed 1,024 to 120,000 positions later get float32 logits that differ
-by 0.01 to 0.11 rms, and by up to 5.7 at single tokens; no best label changed.
-With the angles computed in double precision the same shifts change nothing
-beyond round-off (3e-5), so the cause is the table's rounding and not the
-model. The reference's formula is kept because it reproduces the reference's
-results. In bfloat16 the cosines and sines are also rounded to 8 bits before
-use, and logits at two offsets differ by about 0.26 rms, as any two bfloat16
-runs do. This is why a window cannot reproduce a single pass bit for bit
-(section 16).
+The tables are constructed in `float32` on the CPU. Whereas PyTorch computes `freq[i]` with `float32` `pow`, `opf-mlx` computes it in `float64` and rounds once to `float32` so frequency errors do not accumulate linearly with position. On our test machine, PyTorch is off by 1 ULP on 2 of the 32 frequencies, creating a table difference of up to `1.2e-7 * p` (`4e-5` at position 4,096; `1.3e-3` at position 131,071). Because attention only depends on angle differences between tokens at most 128 positions apart, the maximum angular difference is `1.5e-5` radians—invisible in the final logits (Section 17).
+
+However, the angle `p * inv[i]` is computed in `float32` (matching the reference), so rounding becomes coarser at large positions: `1.2e-4` radians between 2,048 and 4,096 radians, and `4e-3` radians near 100,000. As a result, a passage's logits depend slightly on its absolute offset in a window. Shifting the same 2,430 tokens forward by 1,024 to 120,000 positions changes `float32` logits by `0.01–0.11` RMS (up to `5.7` on individual tokens), though no top label changed. Computing angles in `float64` eliminates this shift down to normal round-off (`3e-5`), confirming table rounding is the sole cause. We keep the reference `float32` formula to maintain parity. In `bfloat16`, `cos` and `sin` are rounded to 8 bits of significand before rotation, shifting logits between offsets by ~`0.26` RMS (typical of any two `bfloat16` runs). This explains why windowed inference cannot match a single pass bit-for-bit (Section 16).
 
 ## 6. Expert routing
 
-The router runs on the normalized input and produces 128 logits per token. The
-four largest are selected, and the mixing weights are a softmax over only those
-four values. The reference divides the weights by 4 and later multiplies the
-sum by 4; both are exact in binary floating point, so they cancel. Each expert
-is a two-layer MLP with the clamped SwiGLU from section 3. The gate half is the
-first 640 outputs of layer 1 and the linear half is the last 640 (contiguous
-halves, not interleaved). The `+1` on the linear half is unconditional.
+The router projects the normalized residual stream to 128 logits per token, selects the top 4 experts, and computes mixing weights via softmax over only those 4 logits. (The reference divides the weights by 4 and multiplies the summed expert output by 4; since powers of two are exact in binary floating point, those factors cancel.)
 
-Per token, 4 of 128 experts run, which is where "1.5B total, 50M active"
-comes from: 50,571,632 parameters touch a given token, excluding the embedding
-table.
+Each expert is a two-layer MLP with the clamped SwiGLU activation from Section 3. The gate half occupies the first 640 channels of layer 1's output and the linear half occupies the remaining 640 channels (contiguous halves, not interleaved). The `+1` offset on the linear half is unconditional.
 
-Choosing the four best experts is the one discrete step in the network. When a
-token's fourth and fifth router scores are closer than the rounding noise of
-the computation, two correct implementations can choose differently, and the
-logits around that token then differ by far more than round-off. Section 17
-has a measured case. In bfloat16 the noise is larger, such choices differ more
-often, and this is part of why bfloat16 logits drift apart.
+Running 4 of 128 experts per token accounts for the model's "1.5B total, 50M active" headline: exactly 50,571,632 parameters touch a given token (excluding the embedding table).
+
+Top-4 expert selection is the single discrete operation in the network. If a token's 4th and 5th router logits are closer than floating-point rounding noise, two valid implementations can pick different experts, producing logit differences well above ordinary round-off around that token (see Section 17 for a measured example). Because `bfloat16` has larger rounding noise, expert flips occur more often and contribute to overall `bfloat16` drift.
 
 ## 7. Normalization
 
-Pre-norm RMSNorm before attention, before the MLP, and once before the
-classifier:
+Pre-norm RMSNorm is applied before attention, before the MoE MLP, and once before the classifier:
 
-```
+```text
 y = x * rsqrt(mean(x², last axis) + 1e-5) * scale
 ```
 
-computed in float32 and cast back to the residual dtype. There are no biases
-and no mean subtraction.
+Normalization runs in `float32` and casts back to the residual stream dtype. There are no biases and no mean subtraction.
 
 ## 8. Classifier output
 
-A bias-free linear layer from 640 to 33, giving logits `[1, T, 33]`, followed
-by a float32 log-softmax. Class 0 is `O`. Classes 1..32 are four boundary tags
-`B, I, E, S` for each of eight categories in this order: `account_number`,
-`private_address`, `private_date`, `private_email`, `private_person`,
-`private_phone`, `private_url`, `secret`. So class `1 + 4c + b` is boundary `b`
-of category `c`. The config carries no label names; the reference infers this
-"v2" label set from `num_labels = 33`. It matches `id2label` in the repository's
-transformers-format config.
+A bias-free linear projection maps `640 -> 33` (`[1, T, 33]`), followed by a `float32` log-softmax:
+
+- Class `0` is `O` (background).
+- Classes `1..32` are four boundary tags (`B`, `I`, `E`, `S`) for each of eight categories in alphabetical order:
+  1. `account_number`
+  2. `private_address`
+  3. `private_date`
+  4. `private_email`
+  5. `private_person`
+  6. `private_phone`
+  7. `private_url`
+  8. `secret`
+- Class `1 + 4c + b` corresponds to boundary `b` of category `c`.
+
+`config.json` does not store label names; the upstream runtime infers this "v2" label space from `num_labels = 33`, matching `id2label` in the Hugging Face Transformers config.
 
 ## 9. Precision
 
-The checkpoint's precision is bfloat16, and the reference keeps the residual
-stream in bfloat16 with float32 only in specific places.
+The checkpoint is stored in `bfloat16`, and the reference implementation keeps the residual stream in `bfloat16` while promoting specific operations to `float32`:
 
 | Stage | Reference dtype |
 |---|---|
-| embedding, residual stream, qkv and output projections, RoPE rotation | bf16 |
-| `q · k` dot products | bf16, then upcast to f32 |
-| band mask, sink, softmax | f32 |
-| `p · v` weighted sum | bf16 |
-| RMSNorm internals | f32, result cast to bf16 |
-| router logits, top-k, softmax | f32 |
-| expert MLPs | f32 on CPU (weights upcast per use); bf16 in the CUDA Triton kernels |
-| logits | bf16, upcast to f32 for log-softmax |
+| Embedding, residual stream, QKV & output projections, RoPE rotation | `bfloat16` |
+| `q · k` dot products | `bfloat16`, then upcast to `float32` |
+| Band mask, attention sink, softmax | `float32` |
+| `p · v` weighted sum | `bfloat16` |
+| RMSNorm internals | `float32`, cast back to `bfloat16` |
+| Router logits, top-k, softmax | `float32` |
+| Expert MLPs | `float32` on CPU (weights upcast per use); `bfloat16` in CUDA Triton kernels |
+| Output logits | `bfloat16`, upcast to `float32` for log-softmax |
 
-The CPU and CUDA paths of the reference therefore differ numerically from each
-other. Only the CPU path can run on a Mac, so it is the parity target.
+Consequently, the upstream CPU and CUDA paths are not numerically identical. Because only the CPU path runs on macOS, it serves as our parity target.
 
-The reference also has a switch that is off by default,
-`OPF_ATTN_LOW_PRECISION` (`opf eval --attn-low-precision`). It keeps the rotary
-tables, the attention scores, the sink and the softmax in bfloat16. It is not
-implemented here.
+The reference also includes an off-by-default flag `OPF_ATTN_LOW_PRECISION` (`opf eval --attn-low-precision`) that keeps rotary tables, attention scores, sinks, and softmax in `bfloat16`. `opf-mlx` does not implement this flag.
 
-bfloat16 keeps 8 significant bits, so *where* a value is rounded matters as
-much as which dtype a step runs in. Measured on PyTorch 2.15 (CPU), by
-comparing each operation with exact arithmetic rounded once:
+### Rounding behavior in `bfloat16`
 
-| Operation in the reference | Where it rounds |
+Because `bfloat16` has only 8 bits of significand (including the implicit leading bit), *where* rounding occurs matters as much as the compute dtype. Measured on PyTorch 2.15 CPU against exact arithmetic rounded once:
+
+| Operation in the reference | Rounding behavior |
 |---|---|
-| `F.linear(x, W, b)` in bf16 | once, after the bias is added (not after the product) |
-| `einsum` / `matmul` in bf16 | once, after a float32-accurate sum |
-| `x1 * cos - x2 * sin` (RoPE) | three times: each product, then the difference; `cos` and `sin` are rounded to bf16 first |
-| `q * qk_scale` (tensor times Python number) | once; the number stays in float32 |
-| `scores.float()` | the scores are already rounded to bf16 when they reach the softmax |
-| `W[..., :-1].to(V.dtype)` | attention weights are rounded to bf16 before they meet the values |
-| `x + proj`, `x + t` | once per residual addition |
+| `F.linear(x, W, b)` in `bfloat16` | Rounds once, *after* adding bias (not after the matrix product) |
+| `einsum` / `matmul` in `bfloat16` | Rounds once, after `float32` accumulation |
+| `x1 * cos - x2 * sin` (RoPE) | Rounds three times (each product, then the difference); `cos`/`sin` are cast to `bfloat16` first |
+| `q * qk_scale` (tensor × Python float) | Rounds once; scalar stays `float32` during multiplication |
+| `scores.float()` | Scores are already rounded to `bfloat16` before entering softmax |
+| `W[..., :-1].to(V.dtype)` | Attention weights are rounded to `bfloat16` before multiplying `V` |
+| `x + proj`, `x + t` | Rounds once per residual addition |
 
-MLX rounds the same way in every row but one: it converts a Python number to
-the array's dtype before multiplying, so `q * 0.35355339` would use
-0.35351563. That flips the last bit of 2.6 % of all query and key entries.
-`opf_mlx.model.scale` multiplies in float32 and rounds once instead.
+MLX matches every row except scalar multiplication: MLX casts a Python float down to the array's dtype before multiplying, turning `q * 0.35355339` into `q * 0.35351563` and flipping the last bit in 2.6% of query/key entries. `opf_mlx.model.scale` works around this by multiplying in `float32` and rounding once.
 
-Float32 matrix products need care on Apple GPUs. MLX 0.32.4 runs them in a
-reduced-precision mode by default on GPUs with neural accelerators (measured
-relative error 1e-3 instead of 1e-6), controlled by `MLX_ENABLE_TF32`, which
-defaults to on in MLX's `utils.h` and is read at
-the first GPU matmul of the process. The reference turns the equivalent
-PyTorch mode off, and the expert MLPs and the router run in float32, so
-`opf_mlx` sets `MLX_ENABLE_TF32=0` on import, measures the precision when a
-model is loaded, and refuses to run on a device where it is reduced. The
-expert layers multiply with `gather_mm`, which runs in other kernels than
-`matmul` and is reduced by the same switch (measured 8e-4), so both are
-measured.
+### Disabling reduced-precision `float32` (TF32) on Apple GPUs
+
+On Apple GPUs with neural accelerators, MLX 0.32.4 defaults to reduced-precision `float32` matrix multiplications (~`1e-3` relative error instead of `1e-6`), controlled by `MLX_ENABLE_TF32` (read once on the first GPU matmul). Because the reference disables the equivalent PyTorch mode and runs both the router and expert MLPs in `float32`, `opf_mlx` sets `MLX_ENABLE_TF32=0` on import and probes both `matmul` and `gather_mm` when loading a model (since `gather_mm` uses separate kernels that exhibit ~`8e-4` error under TF32). Loading fails immediately if reduced precision is detected.
 
 ## 10. Tokenization and text offsets
 
-- `tiktoken.get_encoding("o200k_base").encode(text, allowed_special="all")`.
-  Literal `<|endoftext|>` or `<|endofprompt|>` in the input become their
-  special ids (199999, 200018). Empty input returns no spans.
-- Offsets come from bytes. Each token's bytes are concatenated and decoded as
-  UTF-8 with replacement. A token's character range starts at the character
-  containing its first byte and ends after the character containing its last
-  byte, so a token that splits a multi-byte character is widened outward.
-  Offsets are Python string indices (code points).
-- If the decoded text differs from the input (for example a lone surrogate
-  becomes U+FFFD), spans index the decoded text, `decoded_mismatch` is true,
-  and the result carries a `warning`.
+- Uses `tiktoken.get_encoding("o200k_base").encode(text, allowed_special="all")`. Literal `<|endoftext|>` and `<|endofprompt|>` strings map to their special token IDs (`199999` and `200018`). Empty input returns no spans.
+- Character offsets are reconstructed from token bytes: token bytes are concatenated and decoded as UTF-8 with replacement (`errors="replace"`). A token's character span starts at the character containing its first byte and ends after the character containing its last byte, widening outward if a token splits a multi-byte character. Offsets are Python string indices (Unicode code points).
+- If the decoded string differs from the original input (for example, a lone surrogate becomes `U+FFFD`), returned spans index the decoded text, `decoded_mismatch` is set to `true`, and the result includes a `warning`.
 
 ## 11. Windowing
 
-Tokens are cut into consecutive, non-overlapping windows of `n_ctx` tokens.
-Each window is an independent forward pass with positions restarting at 0, and
-its log-probabilities are written back by absolute token index. Nothing is
-truncated. `n_ctx` is the caller's override if given; otherwise the reference
-uses 4096 on CPU and `default_n_ctx = 128000` elsewhere. Tokens near a window
-edge lose the context on the far side of the cut. (Section 16 describes this
-port's alternative, overlapping windows.)
+Inputs longer than `n_ctx` are split into consecutive, non-overlapping windows of `n_ctx` tokens. Each window runs as an independent forward pass with positions starting at `0`, and log-probabilities are stitched back by absolute token index. Input is never truncated.
+
+If the caller does not specify `n_ctx`, the reference defaults to `4,096` on CPU and `default_n_ctx` (`128,000`) on GPU. Tokens near a window cut lose context from across the boundary. (Section 16 describes `opf-mlx`'s optional overlapping `halo` window policy.)
 
 ## 12. Decoding
 
-Default is constrained Viterbi over the whole token sequence (all windows
-together), in float32, maximizing
+By default, token labels are decoded with constrained Viterbi over the entire token sequence (across all windows combined) in `float32`, maximizing:
 
-```
+```text
 start[y0] + sum_t logp[t, y_t] + sum_t trans[y_(t-1), y_t] + end[y_last]
 ```
 
-| From | Allowed next | Bias name |
+| From | Allowed next | Calibration bias name |
 |---|---|---|
-| start of text | `O`, `B-*`, `S-*` | none |
+| Start of text | `O`, `B-*`, `S-*` | none |
 | `O` | `O` | `background_stay` |
 | `O` | `B-*`, `S-*` | `background_to_start` |
 | `B-x`, `I-x` | `I-x` | `inside_to_continue` |
 | `B-x`, `I-x` | `E-x` | `inside_to_end` |
 | `E-x`, `S-x` | `O` | `end_to_background` |
 | `E-x`, `S-x` | `B-*`, `S-*` | `end_to_start` |
-| last token | must be `O`, `E-*`, `S-*` | none |
+| End of text (last token) | must be `O`, `E-*`, `S-*` | none |
 
-Every other transition scores `-1e9`. The six biases come from
-`viterbi_calibration.json` next to the checkpoint (`operating_points.default.biases`);
-all six are `0.0` in the released file, so only the structural constraints act.
-Ties resolve to the lowest class index. If no final score is finite, or the
-path length is wrong, the reference falls back to per-token argmax. Argmax is
-also selectable as a mode.
+All disallowed transitions receive `-1e9`. The six transition biases come from `viterbi_calibration.json` (`operating_points.default.biases`); in the released checkpoint, all six are `0.0`, so only the structural BIES constraints apply. Ties break toward the lowest class index. If no finite path exists or the decoded path length is invalid, the decoder falls back to per-token argmax (which can also be selected directly).
 
 ## 13. Spans and redaction
 
-1. Labels to token spans with a tolerant state machine (it also accepts the
-   ill-formed sequences argmax can produce).
-2. Token spans to character spans; empty ones are dropped.
-3. Trim leading and trailing whitespace from each span (on by default).
-4. Optionally discard overlapping spans within a label (off by default).
-5. Keep a left-to-right non-overlapping subset, ordered by start, then longer
-   first, then label.
-6. Output mode `typed` keeps labels; `redacted` replaces every label with
-   `redacted` and every placeholder with `<REDACTED>`.
-7. Placeholder is the label uppercased with non-alphanumeric runs replaced by
-   `_`, in angle brackets: `private_person` becomes `<PRIVATE_PERSON>`.
-8. `redacted_text` substitutes each kept span with its placeholder.
+1. Convert decoded token labels to token spans using a tolerant state machine (which also handles ill-formed sequences produced by argmax).
+2. Map token spans to character spans and drop empty spans.
+3. Trim leading and trailing whitespace from each span (enabled by default).
+4. Optionally drop overlapping spans within the same label (disabled by default).
+5. Select a left-to-right non-overlapping set of spans, ordered by start offset ascending, then length descending, then label ascending.
+6. Apply `output_mode`: `typed` preserves original labels; `redacted` collapses every label to `redacted` and every placeholder to `<REDACTED>`.
+7. Format placeholders by uppercasing the label, replacing non-alphanumeric runs with `_`, and wrapping in angle brackets (e.g., `private_person` -> `<PRIVATE_PERSON>`).
+8. Build `redacted_text` by substituting each kept span with its placeholder.
 
-Result schema (version 1): `schema_version`, `summary` (`output_mode`,
-`span_count`, `by_label` sorted by label, `decoded_mismatch`), `text`,
-`detected_spans` (`label`, `start`, `end`, `text`, `placeholder`),
-`redacted_text`, and `warning` only on a decode mismatch. (opf-mlx also warns
-when an input was split into windows; see section 16.)
+**Result schema (version 1)**: `schema_version`, `summary` (`output_mode`, `span_count`, `by_label` sorted alphabetically, `decoded_mismatch`), `text`, `detected_spans` (`label`, `start`, `end`, `text`, `placeholder`), `redacted_text`, and an optional `warning` field. The reference only emits `warning` on a decode mismatch; `opf-mlx` also warns when an input is split across multiple windows (Section 16).
 
-## 14. Ambiguities and how each was resolved
+## 14. Upstream ambiguities and how they were resolved
 
 | Question | Resolution | Evidence |
 |---|---|---|
-| The Hugging Face repo has two checkpoints. Which is the original? | `original/`. The top-level files are a transformers re-layout: split q/k/v, renamed tensors, and an extra `score.bias`. | `checkpoint_download.py` fetches `original/*`; headers compared |
-| What does `sliding_window` mean? | 257 = 128 + 128 + 1, a consistency check only. The transformers config says 128 (per side); gpt-oss uses 128 as a causal lookback. | `_validate_encoder_artifact_contract`, `sdpa` |
-| Are all layers banded? | Yes. gpt-oss bands only even layers. | `AttentionBlock.__init__` |
-| Expert layer 2 is 640 × 640. Is it [in, out] or [out, in]? | [in, out]: `y = x W[e]`. The shape cannot tell. | `MLPBlock.__init__`, `_batched_linear_with_parity` |
-| SwiGLU halves: interleaved or contiguous? | Contiguous. gpt-oss interleaves. | `swiglu(packed=False)`; no `packed_geglu` in config; Triton kernel agrees |
-| Is the `+1` on the linear half conditional? | No, despite a comment tying it to the packed variant. | `swiglu`, Triton kernel line 221 |
-| Router weights: softmax over 128 or over the top 4? | Over the top 4 values. | `MLPBlock.forward` |
-| Where is the `1/sqrt(d)`? | Split as `d^(-1/4)` on q and on k, applied after RoPE. | `AttentionBlock.forward` |
-| Which RoPE pairing and which frequencies? | Interleaved pairs, YaRN blend, magnitude `c` on both tables. | `RotaryEmbedding`, `_apply_rotary_emb` |
-| `dtypes.json` omits the norm scales. What dtype are they? | BF16 in the file, used as float32. | safetensors header; `RMSNorm` |
-| Does the classifier have a bias? | No. | `Transformer.__init__`; header |
-| What precision is the reference? | bf16 stream with float32 islands; CPU and CUDA paths differ in the expert MLPs. | section 9 |
-| Does a bf16 linear layer round before its bias is added? | No. Product and bias are summed in float32 and rounded once. | measured on PyTorch against exact arithmetic |
-| Is `q * qk_scale` computed with the scale rounded to bf16? | No. PyTorch keeps a Python number in float32 for the product. | measured; attention outputs agree in 57-82 % of entries one way and 97-99.9 % the other |
-| What is the context length? | Device-dependent in the reference: 4096 on CPU, 128000 otherwise. | `_resolve_n_ctx` |
-| Are long inputs truncated? | Never. They are windowed without overlap. | `example_to_windows` |
-| Which tokenizer? | tiktoken `o200k_base`, not the repo's `tokenizer.json`. | `load_inference_runtime` |
+| The Hugging Face repo has two checkpoints. Which is original? | `original/`. Top-level files are a Transformers re-layout with split Q/K/V, renamed tensors, and an extra `score.bias`. | `checkpoint_download.py` fetches `original/*`; safetensors headers compared |
+| What does `sliding_window` mean? | `257 = 128 + 128 + 1`, used only as a validation check. (The Transformers config sets 128 per side; `gpt-oss` uses 128 as causal lookback.) | `_validate_encoder_artifact_contract`, `sdpa` |
+| Are all layers banded? | Yes (`gpt-oss` bands only even layers). | `AttentionBlock.__init__` |
+| Expert layer 2 is `640 × 640`: `[in, out]` or `[out, in]`? | `[in, out]`: `y = x W[e]` (ambiguous from shape alone). | `MLPBlock.__init__`, `_batched_linear_with_parity` |
+| Are SwiGLU halves interleaved or contiguous? | Contiguous (`gpt-oss` interleaves them). | `swiglu(packed=False)`; no `packed_geglu` in config; Triton kernel matches |
+| Is the `+1` on the linear half conditional? | No, despite an upstream comment mentioning the packed variant. | `swiglu`, Triton kernel line 221 |
+| Router softmax: over all 128 experts or top 4? | Over only the top 4 values. | `MLPBlock.forward` |
+| Where is `1/sqrt(d)` applied? | Split as `d^(-1/4)` on `q` and `k` individually, after RoPE. | `AttentionBlock.forward` |
+| Which RoPE pairing and frequency schedule? | Interleaved pairs, YaRN blend, magnitude `c` baked into both tables. | `RotaryEmbedding`, `_apply_rotary_emb` |
+| `dtypes.json` omits norm scales. What dtype are they? | Stored as `bfloat16`, computed in `float32`. | Safetensors header; `RMSNorm` |
+| Does the classifier have a bias? | No. | `Transformer.__init__`; safetensors header |
+| What precision does the reference use? | `bfloat16` residual stream with `float32` islands; CPU and CUDA differ in the expert MLPs. | Section 9 |
+| Does a `bfloat16` linear layer round before adding bias? | No; matmul and bias are accumulated in `float32` and rounded once. | Measured on PyTorch vs. exact arithmetic |
+| Is `q * qk_scale` computed with the scale cast to `bfloat16`? | No; PyTorch keeps the Python scalar in `float32`. | Measured: attention outputs match 57–82% of entries if cast, 97–99.9% if kept in `float32` |
+| What is the default context length? | Device-dependent: 4,096 on CPU, 128,000 otherwise. | `_resolve_n_ctx` |
+| Are long inputs truncated? | Never; they are split into non-overlapping windows. | `example_to_windows` |
+| Which tokenizer is used? | `tiktoken` `o200k_base` (not the repo's `tokenizer.json`). | `load_inference_runtime` |
 | Where do label names come from? | Inferred from `num_labels`. | `resolve_label_space_from_config` |
 
-## 15. Properties worth testing
+## 15. Key invariants tested
 
-- Parameter count and every tensor name, shape, and dtype match section 2.
-- Changing a token more than 1024 positions away leaves a token's logits
-  unchanged (section 4).
-- Attention weights plus the sink's share sum to one.
-- Results do not depend on `n_ctx` whenever the text fits in a single window.
-- A token's expert outputs are the same bits whatever other tokens are
-  processed with it.
-- Whatever the window policy, every token is scored exactly once; with the
-  `halo` policy it also sees its whole receptive field or the end of the text.
-- Logits, decoded labels, spans, and redacted text agree with the PyTorch CPU
-  reference on the same text and the same `n_ctx`.
+- Total parameter count and every tensor's name, shape, and dtype match Section 2.
+- Modifying a token more than 1,024 positions away leaves a token's logits unchanged (Section 4).
+- Attention weights plus the sink's share sum to 1.
+- Outputs are independent of `n_ctx` whenever the input fits within a single window.
+- A token's expert MLP outputs are bit-identical regardless of which other tokens are processed alongside it.
+- Under every window policy, every token is scored exactly once; under `halo`, every token sees either its full receptive field or the start/end of the text.
+- Logits, decoded labels, spans, and redacted text match the PyTorch CPU reference for the same input and `n_ctx`.
 
-All of these are tests. `tests/test_model.py` checks the network against an
-independent NumPy implementation of this note, `tests/test_golden.py` against
-outputs recorded from the reference, and `tests/test_parity.py` against the
-reference itself when PyTorch is installed (`reference/`).
+All of these invariants are enforced by automated tests: `tests/test_model.py` validates the MLX model against an independent NumPy implementation of this spec, `tests/test_golden.py` checks against recorded reference outputs, and `tests/test_parity.py` runs live comparisons against PyTorch when installed in `reference/`.
 
-## 16. This implementation
+---
 
-```
-text -> Tokenizer -> token ids -> plan_windows -> Transformer (MLX) -> logits
-     -> log-softmax (NumPy) -> Viterbi or argmax -> token spans
+## 16. The `opf-mlx` implementation
+
+```text
+text -> Tokenizer -> token IDs -> plan_windows -> Transformer (MLX) -> logits
+     -> log-softmax (NumPy) -> Viterbi / argmax -> token spans
      -> character spans -> placeholders
 ```
 
-| Module | Concern |
+| Module | Responsibility |
 |---|---|
-| `config`, `labels` | read and validate `config.json`; label space |
-| `weights` | safetensors reader; every tensor's name, shape and dtype is checked, nothing missing or extra |
-| `model` | the network, `mlx.core` and `mlx.nn` only |
-| `tokenizer` | tiktoken plus byte-to-character offsets |
-| `windows` | how an input longer than `n_ctx` is split |
-| `decoding`, `spans` | Viterbi, argmax, spans, placeholders (NumPy and plain Python) |
-| `pipeline` | `PrivacyFilter`: the one place where the parts meet |
-| `checkpoint` | locate, download and verify the pinned release |
-| `env`, `precision` | what this machine is; whether float32 products are exact |
-| `cli` | the `opf-mlx` command |
-| `serve` | the local detection service: transport only, standard library only (section 18) |
+| `config`, `labels` | Parse and validate `config.json`; define the BIES label space |
+| `weights` | Safetensors reader; validates every tensor name, shape, and dtype (no missing or extra tensors) |
+| `model` | Transformer and MoE network using `mlx.core` and `mlx.nn` only |
+| `tokenizer` | `tiktoken` encoding and byte-to-character offset mapping |
+| `windows` | Windowing policies for inputs longer than `n_ctx` |
+| `decoding`, `spans` | Viterbi/argmax decoding, span extraction, and placeholder substitution (NumPy + stdlib) |
+| `pipeline` | `PrivacyFilter` orchestrating the full pipeline |
+| `checkpoint` | Locating, downloading, and SHA-256 verifying the pinned checkpoint |
+| `env`, `precision` | Machine hardware/memory detection and `float32` matmul precision checks |
+| `cli` | The `opf-mlx` command-line interface |
+| `serve` | Local detection HTTP/Unix-socket server (stdlib only; Section 18) |
 
-Choices that are not the reference's:
+### Design choices beyond the reference
 
-- **Devices.** `gpu` by default, `cpu` on request; never switched silently.
-  `n_ctx` defaults to the checkpoint's 128000 on the gpu and to 4096 on the
-  cpu, which is what the reference does for CUDA and CPU.
-- **Precision.** bfloat16 as stored, or the same weights as float32
-  (`dtype="float32"`), which costs twice the memory and no time. No
-  quantization.
-- **Windows.** The default policy is the reference's consecutive windows. A
-  split is reported in the result's `warning` and as a `PrivacyFilterWarning`,
-  because tokens next to a cut see less context. The `halo` policy feeds each
-  window 1024 more tokens on each side than it keeps (the receptive field of
-  section 4; `halo` sets another width), so every kept token sees the tokens
-  it would see in one pass, and nothing is reported. It takes the fewest
-  windows that can do this: one if the input fits, otherwise
-  `2 + ceil(max(0, tokens - 2 (n_ctx - halo)) / (n_ctx - 2 halo))`. For a long
-  input that is twice the work at `n_ctx = 4096` and under 2 % more at
-  128000. A window too small to
-  keep a token between two halos is refused when the filter is built. Halo
-  windows do not reproduce one pass bit for bit, because positions restart in
-  every window (section 5); section 17 has what they do achieve.
-- **Experts.** The reference's CPU path copies the weights of each token's
-  four experts and multiplies one token at a time (`torch.bmm`). This port
-  sorts the (token, expert) pairs by expert and gives them to `mx.gather_mm`,
-  which multiplies every row by its own expert's matrix in place and takes a
-  run of rows that share an expert in one step. A row's result is the same
-  bits alone or in company (tested), so nothing about the other tokens leaks
-  into it. On the cpu the products are the reference's bit for bit (measured:
-  all 9,720 rows of two layers); on the gpu they are float32-accurate in
-  another summation order. The router runs once on all tokens, as in the
-  reference.
-- **Memory.** The size of the weights is compared with what the machine has
-  before loading: an error if it cannot fit, a warning if it is tight.
-- **Downloads.** Only the three files of the pinned revision, each verified by
-  size and SHA-256. An existing file that is not the release is never replaced
-  unless asked (`--force`).
-- **Chunking.** Attention runs over 128 queries at a time against the keys
-  they can see, and the experts over 16384 tokens at a time, each step
-  finished before the next begins. Both bound memory. The expert step size
-  does not change a bit of the result; the attention step size changes at most
-  the rounding of float32 sums.
+- **Device selection**: Defaults to `gpu`, supports `cpu` on request, and never switches silently. Default `n_ctx` is `128,000` on GPU and `4,096` on CPU (matching upstream CUDA/CPU defaults).
+- **Precision**: Supports stored `bfloat16` (default) or upcast `float32` (`dtype="float32"`, which uses 2x memory without slowing down inference). No quantization.
+- **Overlapping `halo` windows**: The default policy matches the reference's consecutive windows and emits a `warning` / `PrivacyFilterWarning` whenever splitting occurs. The optional `halo` policy pads each window with 1,024 tokens of context on each side (configurable via `halo`), keeping only the interior tokens so every token sees its full receptive field (no boundary warning emitted). It uses the minimum number of windows required: `1` if the input fits, otherwise:
+  ```text
+  2 + ceil(max(0, tokens - 2 * (n_ctx - halo)) / (n_ctx - 2 * halo))
+  ```
+  For long documents, this adds ~2x compute at `n_ctx = 4,096` and under 2% at `n_ctx = 128,000`. Initializing `PrivacyFilter` with a window too small to retain at least one interior token between two halos raises an error. Because RoPE positions restart at `0` in each window (Section 5), halo windows do not match a single pass bit-for-bit; Section 17 shows their measured accuracy.
+- **Grouped expert matmul**: The PyTorch CPU reference gathers each token's four expert weight matrices and multiplies one token at a time (`torch.bmm`). `opf-mlx` instead sorts `(token, expert)` pairs by expert ID and uses `mx.gather_mm`, which multiplies rows by their assigned expert matrix in place and batches contiguous runs sharing an expert. Each row's output is bit-identical whether computed alone or with other tokens (tested), ensuring no cross-token leakage. On CPU, outputs match PyTorch bit-for-bit across all 9,720 rows of both layers; on GPU, they match to `float32` accuracy (different summation order). The router still runs once across all tokens.
+- **Memory checks**: Weight size is checked against available system memory before loading—raising an error if weights cannot fit and warning if headroom is tight.
+- **Verified downloads**: Downloads only the three files from the pinned revision, verifying size and SHA-256 for each. Existing files that do not match the pinned release are left untouched unless `--force` is specified.
+- **Memory-bounded chunking**: Attention runs in chunks of 128 queries against only their visible keys, and expert MLPs run in chunks of 16,384 tokens, evaluating each chunk before starting the next. Expert chunking does not change a single bit; attention chunking affects at most `float32` summation rounding.
 
-## 17. Measured
+## 17. Parity and performance measurements
 
-Apple M5 Max, 128 GiB, macOS 26.6.2, Python 3.13.13, MLX 0.32.4; reference:
-PyTorch 2.15.0 on the same CPU. 2026-11-23.
+All measurements were taken on November 23, 2026 on an Apple M5 Max (128 GiB RAM, macOS 26.6.2, Python 3.13.13, MLX 0.32.4), compared against PyTorch 2.15.0 on the same machine's CPU.
 
-**Agreement with the reference** on the released checkpoint. Logits were
-recorded for 7 texts of 15 to 2,430 tokens (3,349 tokens in all; they are about
-5 rms and up to 28), redaction results for 13 cases:
+### Parity on recorded test cases
 
-| Weights | Device | Largest logit difference | rms, per text | Tokens whose best label differs | Redaction results equal |
-|---|---|---|---|---|---|
-| float32 | gpu | 3.7e-5 | under 6e-6 | 0 of 3,349 | 13 of 13 |
-| float32 | cpu | 3.2e-5 | under 6e-6 | 0 | 13 of 13 |
-| bfloat16 | gpu | 7.1 | 0.09 to 0.33 | 1 | 13 of 13 |
-| bfloat16 | cpu | 7.0 | 0.09 to 0.19 | 1 | 13 of 13 |
-| reference bfloat16 against reference float32 | | 7.2 | 0.07 to 0.45 | 1 | 13 of 13 |
+Logits were recorded for 7 texts ranging from 15 to 2,430 tokens (3,349 tokens total; logit values ~5 RMS, up to 28), and full redaction results for 13 cases:
 
-In bfloat16 one differing last bit early on moves later roundings, so whole
-logits drift apart; the reference drifts as far from its own float32 result.
-The one token whose best label differs is a near-tie in a 20-token text (`O`
-at 5.97 against `I-private_person` at 5.91 on the gpu, 6.09 against 5.84 on the
-cpu, where the reference has 5.94 and 6.16). The reference's own two
-precisions disagree on the token before it. Neither changes a result. What can
-be checked exactly is each sublayer on its own: given the reference's input,
-attention reproduces the reference's output in 96.8 to 100 % of the entries,
-the expert layers in 99.95 % or more, and the classifier in 99.86 % or more.
+| Weights | Device | Max logit diff | Per-text RMS diff | Tokens with different top label | Identical redaction results |
+|---|---|---:|---:|---:|---:|
+| `float32` | GPU | `3.7e-5` | `< 6e-6` | 0 / 3,349 | 13 / 13 |
+| `float32` | CPU | `3.2e-5` | `< 6e-6` | 0 / 3,349 | 13 / 13 |
+| `bfloat16` | GPU | `7.1` | `0.09–0.33` | 1 / 3,349 | 13 / 13 |
+| `bfloat16` | CPU | `7.0` | `0.09–0.19` | 1 / 3,349 | 13 / 13 |
+| Reference `bfloat16` vs. `float32` | CPU | `7.2` | `0.07–0.45` | 1 / 3,349 | 13 / 13 |
 
-**A wider sample.** The recorded texts are few, so 60 further passages of 200
-tokens were scored (12 from a text dense with private data, 48 from the Python
-language reference; 12,000 tokens). No best label differs from the reference's,
-in either precision, on either device.
+In `bfloat16`, a 1-ULP difference early in the network propagates through subsequent layers—comparable to the gap between PyTorch's own `bfloat16` and `float32` runs. The sole differing token was a near-tie in a 20-token text (`O` at 5.97 vs. `I-private_person` at 5.91 on GPU; 6.09 vs. 5.84 on CPU; 5.94 vs. 6.16 in PyTorch), where PyTorch's own two precisions disagreed on the preceding token. Neither changed the final redaction.
 
-- bfloat16: the logits differ from the reference's by 0.61 rms per passage on
-  the gpu and 0.57 on the cpu (medians; 0.85 at most). The reference's own two
-  precisions differ by 0.81 (1.11 at most). Drift is larger on ordinary prose
-  than on the recorded texts.
-- float32: all 60 passages agree to 6e-5 on the gpu, and 59 on the cpu. In the
-  remaining one, a token's fourth and fifth router scores are 0.110512368 and
-  0.110512152 in the reference. The cpu run, whose residual stream differs by
-  round-off, takes the other expert, and logits near that token differ by up
-  to 3.2 (section 6). It is one near-tie among the sample's 96,000 choices of
-  experts.
+Testing each sublayer in isolation on identical reference inputs confirms close numerical agreement: attention matches PyTorch bit-for-bit in 96.8–100% of entries, expert layers in ≥99.95%, and the classifier in ≥99.86%.
 
-**Speed.** `uv run python scripts/benchmark.py` times `redact`, from text to
-result, on the Python language reference that ships with Python. bfloat16,
-fastest of 3:
+### Parity on a larger sample
 
-| Tokens | gpu | tokens/s | peak memory | cpu | tokens/s |
-|---|---|---|---|---|---|
+To test beyond the 7 recorded texts, we scored 60 additional 200-token passages (12 dense with private data, 48 from the Python Language Reference; 12,000 tokens total). Zero top labels differed from PyTorch in either precision or on either device:
+
+- **`bfloat16`**: Median per-passage RMS logit difference was `0.61` on GPU and `0.57` on CPU (max `0.85`), compared to `0.81` median (max `1.11`) between PyTorch's own `bfloat16` and `float32` runs.
+- **`float32`**: All 60 passages agreed within `6e-5` on GPU, and 59 of 60 on CPU. In the 1 remaining passage, a single token had 4th and 5th router scores of `0.110512368` and `0.110512152` in PyTorch; normal round-off caused CPU to pick the other expert, shifting nearby logits by up to `3.2` (Section 6)—one near-tie out of 96,000 expert selections.
+
+### Throughput and latency
+
+Timed end-to-end (`redact` from input text to final result) using `uv run python scripts/benchmark.py` on text from the Python Language Reference (`bfloat16`, fastest of 3 runs):
+
+| Tokens | GPU latency | GPU tokens/s | GPU peak memory | CPU latency | CPU tokens/s |
+|---:|---:|---:|---:|---:|---:|
 | 128 | 29 ms | 4,500 | 3.2 GiB | 127 ms | 1,000 |
 | 2,048 | 63 ms | 32,700 | 3.7 GiB | 869 ms | 2,400 |
-| 4,096 | | | | 1.66 s | 2,500 |
-| 8,192 | 186 ms | 44,100 | 4.2 GiB | | |
-| 32,768 | 730 ms | 44,900 | 5.0 GiB | | |
-| 128,000 | 2.88 s | 44,400 | 5.8 GiB | | |
+| 4,096 | — | — | — | 1.66 s | 2,500 |
+| 8,192 | 186 ms | 44,100 | 4.2 GiB | — | — |
+| 32,768 | 730 ms | 44,900 | 5.0 GiB | — | — |
+| 128,000 | 2.88 s | 44,400 | 5.8 GiB | — | — |
 
-Repeated runs differ by about 5 %, and by 15 % at 128 tokens on the cpu.
-Loading takes 0.2 s. The forward pass is about 2.5 s of the time at 128,000
-tokens; most of the rest is Viterbi decoding.
+Run-to-run variance is ~5% (up to ~15% at 128 tokens on CPU). Model loading takes ~0.2 s. At 128,000 tokens, the forward pass accounts for ~2.5 s of the 2.88 s total; most of the remainder is Viterbi decoding.
 
-float32 weights are faster on short inputs and the same from 8,192 tokens up:
-14 ms at 128 tokens, 49 ms at 2,048 and 2.92 s at 128,000 on the gpu, peaking
-at 5.2 to 9.0 GiB; 65 ms at 128 tokens and 0.8 s at 2,048 on the cpu. What
-bfloat16 adds on short inputs is the upcast of each layer's expert weights to
-float32, about 5 GB written per pass.
+- **`float32` weights**: Faster on short inputs and similar from 8,192 tokens upward—14 ms at 128 tokens, 49 ms at 2,048, and 2.92 s at 128,000 on GPU (5.2–9.0 GiB peak); 65 ms at 128 tokens and 0.8 s at 2,048 on CPU. The extra latency of `bfloat16` on short inputs comes from upcasting each layer's expert weights to `float32` (~5 GB written per pass).
+- **Content independence**: Repeating a single paragraph (activating fewer distinct experts) runs within 3% of varied text on GPU and within 8% on CPU.
+- **Grouped vs. per-expert matmul**: Running a separate matmul per active expert (the simpler alternative to `mx.gather_mm`, Section 16) requires ~100 small dispatches per layer—taking 94 ms vs. 29 ms at 128 tokens and 142 ms vs. 63 ms at 2,048 tokens on GPU. On CPU, the per-expert loop is slower at 128 tokens (176 ms vs. 124 ms forward pass) but faster on longer inputs (689 ms vs. 858 ms at 2,048 tokens; 1.19 s vs. 1.65 s at 4,096 tokens).
+- **Comparison against PyTorch**: On a 2,430-token text, PyTorch takes 11.5 s on CPU (`6.2 s` in `float32`), while `opf-mlx` takes 1.0 s on CPU and 0.07 s on GPU.
+- **Impact of TF32 (Section 9)**: Enabling MLX's reduced-precision `float32` mode gives no speedup at 128 tokens, +8% throughput at 2,048 tokens, and +23–25% from 8,192 tokens upward, while shifting `bfloat16` logits by ~`0.6` RMS (zero top-label changes on a 2,048-token sample). We keep it disabled to match the reference.
 
-What the text is does not matter. One paragraph repeated, which reaches fewer
-experts than varied text, takes the same time within 3 % on the gpu and
-within 8 % on the cpu.
+### Windowing accuracy (`original` vs. `halo`)
 
-The grouped product (section 16) was chosen for the gpu. One product per
-expert in use, the obvious alternative, costs about a hundred small steps per
-layer: 94 ms instead of 29 at 128 tokens on the gpu, and 142 instead of 63 at
-2,048. On the cpu the alternative is slower on short inputs (176 ms against
-124 for the forward pass at 128 tokens) and faster on long ones (689 ms
-against 858 at 2,048 tokens, 1.19 s against 1.65 s at 4,096).
+Two ~12,000-token documents were scored in a single pass and compared against 4,096-token windows (3 consecutive windows vs. 5 windows with a 1,024-token halo). GPU results below (CPU RMS values were within 10%):
 
-The reference takes 11.5 s for one 2,430-token text on this CPU (6.2 s with
-float32 weights). opf-mlx takes 1.0 s for the same text on the cpu and 0.07 s
-on the gpu.
+| Document | Weights | Policy | Log-prob RMS diff (max) | Differing labels | Differing spans |
+|---|---|---|---:|---:|---:|
+| Synthetic records (12,150 tokens, 720 spans) | `float32` | `original` | `0.36` (`17`) | 2 | 3 |
+| | `float32` | `halo` | `0.08` (`7.4`) | 0 | 0 |
+| | `bfloat16` | `original` | `0.68` (`17`) | 0 | 0 |
+| | `bfloat16` | `halo` | `0.67` (`8.9`) | 0 | 0 |
+| Python docs (11,681 tokens, 2 spans) | `float32` | `original` | `0.96` (`17.5`) | 0 | 0 |
+| | `float32` | `halo` | `0.25` (`9.9`) | 0 | 0 |
+| | `bfloat16` | `original` | `1.89` (`19`) | 0 | 0 |
+| | `bfloat16` | `halo` | `1.82` (`19`) | 0 | 0 |
 
-The reduced-precision float32 mode (section 9) gives nothing at 128 tokens,
-8 % more tokens per second at 2,048 and 23 to 25 % more from 8,192 up. It
-moves the bfloat16 logits of varied text by 0.6 rms, about as much as they
-differ from the reference on such text; no best label changed in a
-2,048-token sample. It is left off because the reference leaves its equivalent
-off.
+With `halo`, no token loses context; the remaining difference comes solely from RoPE positions restarting at `0` in each window (Section 5). The `float32` rows isolate the effect of lost context: consecutive windows altered 3 of 720 spans, whereas `halo` altered none (at 1.6x runtime: 0.45 s vs. 0.28 s). Tokens in the first window beyond reach of the cut (3,072 of 12,150) match the single pass bit-for-bit under both policies.
 
-**Windows.** Two texts of about 12,000 tokens were scored in one pass and in
-windows of 4,096 tokens: 3 consecutive windows, or 5 with a halo of 1,024. The
-table gives the difference from one pass on the gpu; on the cpu the rms values
-are within 10 % of these.
+In `bfloat16`, `halo` does not guarantee single-pass equivalence on borderline entities. On a synthetic third document containing a repeated borderline phrase ("9 April" repeated 40 times across 4,240 tokens, split at 2,500 tokens, flagged as a date in 2 of 40 spots in one pass), spans differing from the 322 single-pass spans were:
 
-| Text | Weights | Windows | Log-probability difference, rms (largest) | Decoded labels that differ | Spans that differ |
-|---|---|---|---|---|---|
-| records, 12,150 tokens, 720 spans | float32 | consecutive | 0.36 (17) | 2 | 3 |
-| | | halo | 0.08 (7.4) | 0 | 0 |
-| | bfloat16 | consecutive | 0.68 (17) | 0 | 0 |
-| | | halo | 0.67 (8.9) | 0 | 0 |
-| language reference, 11,681 tokens, 2 spans | float32 | consecutive | 0.96 (17.5) | 0 | 0 |
-| | | halo | 0.25 (9.9) | 0 | 0 |
-| | bfloat16 | consecutive | 1.89 (19) | 0 | 0 |
-| | | halo | 1.82 (19) | 0 | 0 |
+| Weights | Device | `original` | `halo` |
+|---|---|---:|---:|
+| `float32` | GPU, CPU | 5 | 0 |
+| `bfloat16` | GPU | 3 | 1 |
+| `bfloat16` | CPU | 4 | 6 |
 
-With a halo no token lacks context, so what remains is rounding: positions
-restart in every window (section 5), and in bfloat16 any change is amplified
-to the usual drift, which hides the difference between the policies. The
-float32 rows show what the missing context itself does: consecutive windows
-changed 3 of 720 spans, and halo windows none. Halo windows took 1.6 times as
-long (0.45 s against 0.28 s). Tokens of the first window that are out of
-reach of the cut get the scores of one pass bit for bit under either policy
-(3,072 of the 12,150).
+In `float32`, `halo` matched single-pass spans across all three documents (while consecutive windows falsely flagged "9 April" in five paragraphs after the cut). In `bfloat16`, near-ties tip according to position-dependent rounding, making single-pass and halo outputs equally valid within `bfloat16` noise.
 
-A halo does not make bfloat16 results those of one pass. A third text was
-built to have a borderline entity: one paragraph 40 times (4,240 tokens,
-windows of 2,500), in which "9 April" is labelled a date in 2 of its 40
-places in one pass. Spans that differ from the 322 of one pass:
+---
 
-| Weights | Device | consecutive | halo |
-|---|---|---|---|
-| float32 | gpu, cpu | 5 | 0 |
-| bfloat16 | gpu | 3 | 1 |
-| bfloat16 | cpu | 4 | 6 |
+## 18. The local detection service (`opf-mlx serve`)
 
-In float32 halo windows gave the result of one pass in all three texts, where
-consecutive windows label "9 April" a date in each of the five paragraphs
-after the cut. In bfloat16 a nearly tied decision falls with the rounding,
-which differs wherever positions do, so here halo windows are no closer to
-one pass than consecutive ones. The one-pass and the halo result differ only
-in rounding, and neither is the more correct.
+`opf-mlx serve` exposes span detection to other local programs over HTTP: text in, spans out. The caller decides how to mask or redact.
 
-## 18. The detection service
-
-`opf-mlx serve` answers detection requests from other programs on this
-machine: text in, spans out. What to do with a span is the caller's business.
-
-```
+```text
 GET  /health     -> {"status": "ok", "api": 1, "labels": [...], "device", "dtype", "n_ctx"}
 POST /v1/detect  {"texts": ["...", ...], "offsets": "codepoint" | "utf16"}
                  -> {"results": [{"spans": [{"start", "end", "label"}, ...], "warning"?}, ...]}
 ```
 
-`serve.py` is transport and nothing else. It is handed a function from one
-text to its spans and does not import the model; `cli.py` builds that function
-from a `PrivacyFilter`. The module uses the standard library alone
-(`http.server` over `socketserver`), so the service adds no dependency.
+`serve.py` handles transport only and uses nothing outside the Python standard library (`http.server` over `socketserver`). It accepts a detector callable rather than importing the model directly; `cli.py` wires it up to a `PrivacyFilter`.
 
-- **Where it listens.** A Unix socket, `~/.opf/opf-mlx.sock` by default,
-  created with mode 0600 under a umask so that it is never open to others even
-  for a moment; or, with `--port`, a loopback TCP address. An address that is
-  not loopback is refused: the service has no authentication, and the socket's
-  permissions are its access control.
-- **One owner per socket.** The path is claimed with a lock file beside it
-  before the model is loaded, so the second of two servers started together
-  gives up at once instead of loading the weights first. A socket file whose
-  owner is gone is removed.
-- **One request at a time**, in the thread that called `serve`. The model is
-  never entered twice at once, and MLX is not asked to be thread-safe.
-- **No text in any output.** Nothing is logged per request. An error names a
-  position and a type ("detection failed for text 2 of 5 (ValueError)"), never
-  content, and the standard error pages, which would quote the request line,
-  are replaced.
-- **All or a reason.** A body over `--max-request-bytes` (64 MiB) is a 413,
-  another content type a 415, a malformed request a 400, a text the detector
-  fails on a 500 that says which text. Nothing is cut to fit. A text that the
-  tokenizer cannot give back unchanged is refused, because its spans would
-  index a different string.
-- **Offsets** count code points, or UTF-16 code units on request, which is
-  what a JavaScript string indexes by. Half a surrogate pair becomes U+FFFD,
-  one unit for one, so every offset still fits the caller's string.
-- **Lifetime.** `--idle-exit SECONDS` ends the process after that long without
-  a request; a detection in progress is not idle time. SIGTERM and SIGINT
-  stop it after the request in hand.
-- **Version.** `"api": 1` in `/health`. A client that expects another number
-  must not use the service.
+- **Local-only listening**: Defaults to a Unix socket at `~/.opf/opf-mlx.sock`, created under a restrictive `umask` with mode `0600` so it is never accessible to other users even briefly. `--port` binds only to loopback TCP addresses and rejects non-loopback hosts, because the service has no authentication and relies on OS permissions for access control.
+- **Exclusive socket ownership**: Claims a companion lock file *before* loading weights, so if two instances launch simultaneously, the second exits immediately instead of wasting memory loading the model. Stale socket files left by dead processes are cleaned up automatically.
+- **Sequential execution**: Processes one request at a time on the serving thread, avoiding concurrent calls into MLX.
+- **Zero content logging**: Does not log per-request traffic. Error messages report only the item index and exception type (e.g., `"detection failed for text 2 of 5 (ValueError)"`), and default `http.server` error pages—which echo the request line—are overridden.
+- **Strict error responses**: Rejects payloads over `--max-request-bytes` (default 64 MiB) with `413`, non-JSON content types with `415`, malformed payloads with `400`, and per-text detection failures with `500`. Input is never silently truncated. Any text that does not round-trip cleanly through the tokenizer is rejected because its span offsets would refer to a different string.
+- **Offset units**: Supports Unicode code points (`"codepoint"`, default) or UTF-16 code units (`"utf16"`, matching JavaScript string indices). Unpaired surrogates map 1-to-1 to `U+FFFD`, keeping offsets aligned with the caller's string.
+- **Lifecycle**: `--idle-exit SECONDS` shuts the server down after the specified period without requests (active detection time does not count as idle). `SIGTERM` and `SIGINT` trigger a clean shutdown after the current request finishes.
+- **Protocol versioning**: `/health` advertises `"api": 1`; clients expecting a different version must refuse to connect.
 
-Each text is one forward pass (section 16), so a request costs the sum of its
-texts. Measured through the socket on the machine of section 17, with pieces
-of this repository as texts: 31 ms for 500 characters, 46 ms for 4,000,
-118 ms for 20,000, 0.56 s for 100,000 and 5.9 s for a million; and 44 to 47 ms
-per text for 64 or 500 texts of 4,000 characters (2.8 s and 23 s). The fixed
-part of a pass dominates short texts (section 17), so many short texts cost
-more than one long text of the same total length.
+### Service latency
 
-## 19. The privacy screen for Pi
+Because each text runs in its own forward pass (Section 16), batch latency is the sum of per-text latencies. Measured over the Unix socket on the M5 Max from Section 17 using files from this repo:
 
-`pi-privacy-screen/` is an extension for the Pi coding agent, written in
-TypeScript without dependencies. It replaces private values in what Pi sends
-to a model provider by numbered placeholders and puts the values back into
-what comes in. Its README says how to use it; this section says how it is
-built and why.
+- Single texts: 31 ms (500 chars), 46 ms (4,000 chars), 118 ms (20,000 chars), 0.56 s (100,000 chars), 5.9 s (1,000,000 chars).
+- Batches of 4,000-char texts: 44–47 ms per text for 64 texts (2.8 s) and 500 texts (23 s).
 
-**The invariant.** Everything stored and shown on this machine is real;
-everything sent to a provider is masked. The session file, the screen and the
-tools see values. A request sees placeholders.
+Because fixed per-pass overhead dominates short texts (Section 17), many short strings take longer than a single long string of the same total length.
 
-![How a request is screened](privacy-screen-flow.svg)
+---
 
-**Where it sits.** Pi offers extensions hooks around a request. These are
-used, in the order they run:
+## 19. The privacy screen for Pi (`pi-privacy-screen/`)
 
-| Hook | What happens |
+`pi-privacy-screen/` is a zero-dependency TypeScript extension for the Pi coding agent. It masks sensitive values with numbered placeholders before requests leave your machine and restores the real values in incoming replies and tool calls. (See `pi-privacy-screen/README.md` for user documentation; this section covers architecture and rationale.)
+
+### Core invariant
+
+Everything stored, displayed, and executed locally uses real values; everything sent to a remote model provider uses placeholders.
+
+![Diagram showing how a request is screened](privacy-screen-flow.svg)
+
+### Pi hook integration
+
+The extension hooks into Pi's request lifecycle in the following order:
+
+| Hook | Responsibility |
 |---|---|
-| `session_start` | settings and the session's placeholder table are loaded; the detector is started; the conversation the session starts with is checked ahead of its first request |
-| `input` | in mask mode the detector has to answer, or the message is not sent and its text goes back to the editor |
-| `before_agent_start` | the system prompt gets a short note on what placeholders are and how to use them; `.env` files are read again |
-| `context_with_system` | every text of the request is masked; a text that cannot be checked is withheld; with the detector down the request is aborted |
-| `before_provider_request` | a last look at the finished payload for known values in parts that are not rewritten text by text (tool descriptions and the like) |
-| `message_end` | a reply's text and the arguments of its tool calls get their values, before the message is stored |
-| `tool_call` | whatever is still masked when a tool is about to run gets its value; a command that cannot take a value safely is blocked with the reason |
-| markdown transformer | a reply is shown with values while it streams; thinking whenever it is shown |
-| `session_before_compact`, `session_before_tree` | summaries are requested through Pi's own `compact()` and `generateBranchSummary()` with a stream function that masks, since these requests do not pass the hooks above |
+| `session_start` | Load config and session placeholder table; start the detector; begin background pre-scanning of existing session messages |
+| `input` | In `mask` mode, verify the detector is reachable before sending; otherwise block submission and restore text to the editor |
+| `before_agent_start` | Inject concise placeholder instructions into the system prompt; re-read `.env` files |
+| `context_with_system` | Mask every outgoing text; withhold any text that cannot be checked; abort the request if the detector goes down |
+| `before_provider_request` | Final sweep over the serialized payload to replace known values in fields not rewritten message-by-message (e.g., tool descriptions) |
+| `message_end` | Restore real values in the assistant reply and its tool-call arguments before Pi persists the message |
+| `tool_call` | Restore any remaining placeholders right before tool execution; block shell commands that cannot be quoted safely |
+| Markdown transformer | Unmask streaming assistant replies and thinking blocks for terminal display |
+| `session_before_compact`, `session_before_tree` | Run compaction and branch summaries via Pi's `compact()` / `generateBranchSummary()` with a custom masking `streamFn`, since summary calls bypass standard hooks |
 
-Pi carries on with the unchanged request when a handler of `context` or
-`before_provider_request` throws. So no handler on the way out may throw:
-each one catches everything, withholds what was not checked and stops the
-request.
+**Fail-closed error handling**: Because Pi continues with the unmodified request if a `context` or `before_provider_request` handler throws, no outgoing handler is allowed to throw. Every exception is caught, unchecked text is withheld, and the request is aborted.
 
-Several extensions' handlers of one hook run in the order Pi loaded the
-extensions, each receiving what the one before returned. Masking sits in
-`context_with_system`, the last hook that sees messages, so it sees what any
-extension did in `context`. What another extension adds in
-`context_with_system` or to the payload after this one has run is not
-checked by the detector.
+**Hook ordering**: Pi invokes multiple extensions' handlers in directory-listing load order, chaining each return value into the next. Masking runs in `context_with_system`—the final message-level hook—so it sees modifications made by other extensions in `context`. Text injected later in `context_with_system` or `before_provider_request` by extensions loaded after `privacy-screen` is not scanned.
 
-**Modules.** `vault` is the placeholder table. `patterns` and `spans` turn
-text and detector spans into found values. `screen` decides what is replaced
-by what and remembers it. `messages` knows the shapes of Pi's messages and of
-provider payloads. `shell` puts values into shell commands. `detector` is the
-client of section 18. `dotenv` and `config` read files. `index` is the only
-module that touches Pi, and it needs none of Pi's code to load, so everything
-is tested under plain Node.
+### Module structure
 
-**Placeholders.** `<KIND_n>` with the kinds SECRET, EMAIL, PERSON, PHONE,
-ADDRESS, ACCOUNT, URL, DATE and LITERAL. One per distinct value, for the whole
-session. They are saved in the session file as custom entries and read back
-from every branch of it, so a number never comes to mean a second value after
-`/resume`, `/fork` or `/tree`.
+- `vault.ts`: Session placeholder table.
+- `patterns.ts`, `spans.ts`: Deterministic key-format rules and ML span normalization.
+- `screen.ts`: Core masking/unmasking logic, per-session caching, and cross-turn consistency.
+- `messages.ts`: Traversal of Pi messages and serialized provider payloads.
+- `shell.ts`: Context-aware shell quoting.
+- `detector.ts`: Client and process manager for `opf-mlx serve` (Section 18).
+- `dotenv.ts`, `config.ts`: `.env` secret pre-seeding and config parsing.
+- `index.ts`: The only module that interacts with Pi's extension API; it has zero runtime imports from Pi so all modules run and test under plain Node.
 
-**What is found.** Three sources, joined:
+### Placeholders and persistence
 
-1. The detector, for the labels the settings allow (by default not URLs and
-   dates). A span is trimmed to the value alone, because a placeholder has to
-   stand for exactly what is put back: `=support@example.com,` is the address
-   without `=` and `,`; a `NAME=value` pair is the value; a span over two
-   lines is two values. Spans that cannot be what their label says (a phone
-   number with fewer than 7 digits) are dropped.
-2. Patterns for key formats and for values assigned to sensitive names. The
-   text may have been written to make a pattern slow, so none restarts at
-   every word and reads on, and "20 or more" is written as 20 and then any
-   number: 1 MB of crafted input stays under 150 ms in every rule.
-3. Known values: everything that has a placeholder already, and the secret
-   values of the project's `.env` files. They are replaced wherever they
-   occur, whether or not anything detects them there. A value shorter than
-   three characters is replaced only where it was detected; a word-like value
-   only where it stands alone ("Lena" not in "Lenard"); a long mixed key
-   anywhere.
+Placeholders take the form `<KIND_n>` where `KIND` is one of `SECRET`, `EMAIL`, `PERSON`, `PHONE`, `ADDRESS`, `ACCOUNT`, `URL`, `DATE`, or `LITERAL`. Each unique value receives one placeholder for the entire session. Mappings are persisted as custom entries in Pi's session file and loaded across *all* branches on open, ensuring a placeholder number can never be reassigned to a different value after `/resume`, `/fork`, or `/tree`.
 
-Because a value found in a later text has to be replaced in the earlier ones
-too, texts are rendered again until the table stops growing.
+### Detection sources
 
-**Where a text comes from** decides how it is treated:
+Masking combines three sources:
 
-| Origin | What it is | Treatment |
+1. **Local ML detector**: Scans for enabled labels (excluding URLs and dates by default). Returned spans are trimmed to exact values so restoration is lossless (e.g., `=support@example.com,` becomes `support@example.com`, `NAME=value` keeps only `value`, and multi-line spans split per line). Implausible spans (such as phone numbers with fewer than 7 digits) are discarded.
+2. **Regex patterns**: Matches structured credential formats and assignments to sensitive variable names. Patterns are written to avoid catastrophic backtracking—never restarting greedily at every word, and expressing "20+" length checks as 20 fixed characters followed by a linear tail—keeping 1 MB of adversarial input under 150 ms per rule.
+3. **Known values**: Includes all values already in the vault plus secrets pre-seeded from `.env` files. Known values are replaced everywhere regardless of whether the detector flags them again. Values shorter than 3 characters are only replaced at detected spans; word-like values match only on word boundaries ("Lena" will not match inside "Lenard"); long mixed-character keys match anywhere.
+
+Because a value discovered in a later turn must also be masked in earlier turns, masking iterates until the placeholder table reaches a fixed point.
+
+### Origin-based handling
+
+How a piece of text is processed depends on where it came from:
+
+| Origin | Source | Handling |
 |---|---|---|
-| input | what the user sent, tool results, shell output, files, other extensions' messages | detector, patterns, known values |
-| system | the system prompt | patterns and known values only |
-| provider | what the model wrote, going back to the provider that wrote it | sent exactly as it was written, its placeholders still meaning their values |
-| foreign | what another model wrote, and every summary | checked like input, except that the screen's own placeholders keep their meaning |
+| `input` | User messages, tool results, shell output, files, other extensions' messages | ML detector + regex patterns + known values |
+| `system` | System prompt | Regex patterns + known values only |
+| `provider` | Prior assistant replies going back to the *same* provider | Sent verbatim as originally received, preserving placeholders and prompt caching |
+| `foreign` | Replies from a *different* model/provider, and all summaries | Checked like `input`, except existing screen placeholders keep their meaning |
 
-A provider has seen its own words, and a conversation that goes back out
-byte for byte the same keeps the provider's prompt cache. So what the model
-wrote is remembered in the form it arrived (in the session file, by a digest
-of its real text) and sent in that form again. Another provider has not seen
-it: after a switch of model those texts are checked first. That includes the
-other model's thinking, although Pi 1.6 leaves it out of such a request; what
-is sent is Pi's decision, and what is sent has to have been checked.
+Remembering assistant replies in their original masked form (keyed in the session file by a digest of the unmasked text) ensures byte-for-byte consistency for the originating provider's prompt cache. Switching models treats earlier replies from the previous provider as `foreign` so they are re-screened before the new provider sees them (including prior thinking blocks, in case Pi ever includes them).
 
-**Only the screen makes placeholders.** Text that merely has the shape of
-one, in a file, in a tool's output or typed, is replaced by a `<LITERAL_n>`
-that stands for exactly that text. Otherwise a file containing `<EMAIL_1>`
-would be given somebody's address when the model writes it back, and text
-planted in a web page could name a value it has never seen. A placeholder
-refers to a value only in text the model wrote in answer to a masked request.
+### Preventing placeholder spoofing
 
-**A reply gets values only if its request went out masked.** In report mode,
-with the screen off, or with a local model, the model was sent the real text.
-A placeholder in its reply is then a quotation, and the reply is left as it
-was written. The same holds for what is shown while a reply streams. Once a
-reply is stored it holds its values, so a placeholder still in it is text and
-is shown as text.
+Any text in untrusted input (files, tool output, user messages) that already looks like a placeholder (e.g., `<EMAIL_1>`) is escaped to `<LITERAL_n>` on the way out and restored verbatim on the way back. Without this, a file or web page containing `<EMAIL_1>` could trick the model into echoing it back and leaking another session value. Placeholders only resolve to vault entries when written by a model replying to a masked request.
 
-**Tool calls.** The arguments of a reply's tool calls get their values when
-the reply arrives, and the message is stored that way; Pi does not write a
-change made in `tool_call` back to the stored message. Each value is put in
-once: a value may itself contain text shaped like a placeholder, so what was
-put in is recorded per call and not looked at again when the tool runs.
+### Conditional unmasking
 
-**Shell commands.** A value is whatever some file contained, and one like
-`$(rm -rf ~)` pasted into a command would run. Unmasked, the model would have
-seen that and quoted it; masked, it cannot, so `shell.ts` reads the command
-far enough to know where each placeholder stands and writes the value as
-plain data for that position: single-quoted outside quotes, escaped inside
-double quotes, `$'...'` and here-documents. Where that cannot be done with
-certainty the command is refused with a reason the model can act on: inside
-backquotes, `${...}` or arithmetic, after a `$` or a backslash, a value that
-would be read as an option or would end a here-document, anything after
-syntax the reader does not follow. Refusing costs a retry; guessing wrong
-would run somebody else's text. It is tested against bash 5, bash 3.2 (still
-`/bin/bash` on macOS, with its own reading of `$( )`), zsh and sh, with
-hostile values in every position and with generated commands. The refusal
-names the placeholder without its angle brackets, because the message reaches
-the model as a tool's output, where a placeholder would become a literal.
+Replies are only unmasked if the corresponding outgoing request was actually masked. In `report` mode, `off` mode, or when talking to a local model, the model saw the real text—so any placeholder-like text in its reply is a literal quote and is left untouched (both in streaming display and final storage). Once a reply is saved, its values are already restored, so any remaining placeholder-like strings are displayed literally.
 
-**When something cannot be checked.**
+### Tool calls and safe shell quoting
 
-| Situation | In mask mode |
+Tool-call arguments are unmasked in `message_end` before storage (since edits in `tool_call` are not written back to Pi's session log). Each tool call's restored arguments are recorded per call ID so `tool_call` does not double-unmask values that happen to contain placeholder-like strings.
+
+Because a masked value could contain arbitrary untrusted characters—such as `$(rm -rf ~)`—that an unmasked model would have known to quote, `shell.ts` parses shell syntax far enough to identify each placeholder's exact quoting context and inserts the value strictly as literal data (single-quoted outside quotes; properly escaped inside double quotes, `$'...'`, and heredocs). Whenever safe quoting cannot be guaranteed—inside backticks, `${...}` expansions, arithmetic contexts, immediately after `$` or `\`, where a value could be parsed as a CLI flag or terminate a heredoc, or after unsupported syntax—the command is blocked with an actionable refusal. Refusal messages omit the angle brackets around placeholder names so Pi doesn't re-escape them as `<LITERAL_n>` when feeding the error back to the model.
+
+### Failure modes
+
+| Situation | Behavior in `mask` mode |
 |---|---|
-| the detector is down when a message is sent | the message is not sent; its text goes back to the editor |
-| it goes down during a run | the request is aborted; what was already checked is unaffected |
-| one text fails (too large, not tokenizable, a pattern gives up) | that text is replaced by a notice that it was withheld; the request goes on |
-| anything throws inside the screen | the request is stopped and nothing of it is sent |
-| a summary cannot be screened or made | compaction or the branch summary is cancelled |
-| a command cannot take a value safely | the tool call is blocked with the reason |
+| Detector unreachable before sending | Message blocked; input restored to the editor |
+| Detector fails mid-request | Request aborted; already-cached texts remain valid |
+| Single text fails (over 8 MiB, non-tokenizable, pattern abort) | That text is replaced with a withheld notice; request continues |
+| Unexpected error inside extension | Request aborted; nothing sent |
+| Summary request cannot be screened or generated | Compaction or branch summary cancelled |
+| Shell command cannot be safely quoted | Tool call blocked with a reason |
 
-In report mode nothing is changed in either direction, and with the screen
-off or a local model nothing is looked at. A model counts as local only if
-its address is loopback or the settings name its provider.
+In `report` mode, nothing is modified in either direction. When `off` or using a local model (loopback URL or listed in `localProviders`), screening is bypassed completely.
 
-**The detector process** is shared by all Pi sessions and started by the
-first one that needs it, detached, with `--no-download` and an idle exit.
-Two sessions that start together race for the socket's lock; the loser
-notices that the other one owns the path and waits for it. A failed start is
-not repeated for 30 seconds, so a missing checkpoint does not cost a model
-load attempt per keystroke. Something else listening on the socket, or
-another API version, is reported and never worked around.
+### Detector process management
 
-**Cost.** A text is sent to the detector once per session and its result
-kept by a digest of the text; a pass over a checked conversation of 2 MB
-takes about 1 ms, and the last look 63 ms. The detector's 45 ms per text is
-what is felt. After `pi -c` or `/resume` the whole conversation is new to the
-process, which would hold the first message back by that time for every
-message of the session. So it is checked at `session_start`, while the user is
-typing, and the first request waits for that check instead of asking again.
+All Pi sessions share a single detached `opf-mlx serve` process launched on demand with `--no-download` and `--idle-exit`. If two sessions start simultaneously, both race for the socket lock; the loser detects the live owner and waits for it to become ready. Failed launches back off for 30 seconds so a missing checkpoint doesn't trigger repeated startup attempts on every keypress. Unexpected processes on the socket path or incompatible API versions are surfaced as errors and never bypassed.
 
-**Tested.** 177 unit tests under Node, among them the shell substitution run
-in the real shells. A mutation check (`test/mutations.py`) makes 183
-deliberate defects one at a time in a copy of the source and expects the unit
-tests to notice each; all are noticed. An end-to-end run (`test/e2e/run.ts`)
-drives the real `pi` 1.6.0, in RPC mode and in its terminal UI, with the real
-detector and a pretend provider that records every request: 73 checks in eleven
-scenarios, among them that no request carries a real value, that files and
-commands get real ones, that a hostile value in a command stays data, and
-that with the detector down nothing is sent. It runs Pi with a home and agent
-directory of its own. Not covered: no type check has been run (there is no
-TypeScript compiler here), branch summaries are tested at unit level only,
-and how many private values the detector misses on real material has not been
-measured.
+### Runtime overhead and background pre-scanning
 
-**Limits** are listed in the extension's README under "What it does not
-cover". The ones that follow from the design: the screen governs the text of
-model requests, not what tools do with the values they are given; a value in
-another form (encoded, hashed, split) is another string; the system prompt
-is not sent to the detector; and a provider's own signed thinking is never
-rewritten.
+Each unique text is sent to `opf-mlx serve` at most once per session and cached by content digest. Re-masking a cached 2 MB conversation takes ~1 ms, plus ~63 ms for the final payload sweep; the ~45 ms per unseen text in the detector is the dominant cost. When resuming a long session (`pi -c` or `/resume`), `session_start` kicks off background pre-scanning while the user types, and the first outgoing request awaits that in-flight promise rather than duplicating work.
 
-![What the screen covers, and what gets past it](privacy-screen-limits.svg)
+### Verification
+
+- **Unit tests**: 177 tests under Node, including executing shell-quoted commands with adversarial values in real `bash` 5, macOS `bash` 3.2 (which parses `$( )` differently), `zsh`, and `sh`.
+- **Mutation testing**: `test/mutations.py` injects 183 single-line defects into copies of the source and verifies the unit tests catch all 183.
+- **End-to-end tests**: `test/e2e/run.ts` drives real `pi` 1.6.0 in both RPC mode and TUI mode (`tmux`) with isolated home/agent directories, the real `opf-mlx` detector, and a local mock provider recording every request (73 checks across 11 scenarios, verifying zero leaked values, real tool outputs, safe shell quoting of hostile values, and fail-closed behavior when the detector is down).
+- **Known gaps**: TypeScript type-checking has not been run yet (no `tsc` in the current environment), branch summaries are only unit-tested, and real-world detection recall has not been measured.
+
+### Design boundaries
+
+Full limitations are listed in `pi-privacy-screen/README.md` under *What it does not cover*. Structurally, the extension governs only the text of outgoing Pi model requests—not what tools do with real values, not encoded/hashed/split representations, not names appearing solely in the system prompt, and not signed provider thinking blocks.

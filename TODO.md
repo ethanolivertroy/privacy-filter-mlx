@@ -1,84 +1,41 @@
-# To do
+# To Do
 
-Open decisions and open work. What the project does not do is in the
-READMEs: [Limitations](README.md#limitations) and
-[What it does not cover](pi-privacy-screen/README.md#what-it-does-not-cover).
+Open design decisions and remaining work. Known project limitations are documented in the READMEs: [Limitations](README.md#limitations) and [What it does not cover](pi-privacy-screen/README.md#what-it-does-not-cover).
 
-## Decide whether the privacy screen's defaults stay
+## Review the privacy screen's default settings
 
-The extension's defaults were set when it was built. None has been looked at
-again after real use, and each trades protection against getting in the way.
+The Pi extension's defaults were chosen during initial development and have not yet been revisited after extended daily use. Each involves a trade-off between stronger protection and convenience:
 
-- [ ] **It masks from its first start.** The other way: start in `report`
-  mode, which counts what it would mask and changes nothing, and switch to
-  `mask` once the findings look right. Possible today with
-  `"mode": "report"` in the settings, or `/privacy report` for one session.
-- [ ] **A message is not sent while the detector cannot be reached.** The
-  other way: send it unscreened, with a warning. There is no setting for
-  that; today the way around is `/privacy off`, by hand.
-- [ ] **URLs and dates are not masked.** Secrets, e-mail addresses, phone
-  numbers, names of people, addresses and account numbers are. The other
-  way: add `private_url` and `private_date` to `"labels"` in the settings.
-  They are left out because code is full of both.
-- [ ] **Requests to a model on this machine are not screened.** The other
-  way: `"screenLocalModels": true` in the settings.
-- [ ] **A placeholder that someone typed is not a placeholder.**
-  `<SECRET_1>` in a message, a file or a tool result goes out as
-  `<LITERAL_n>` and comes back as the text it was, so a file or a web page
-  cannot call up a stored value. Nor can you, by typing one. There is no
-  setting for this.
+- [ ] **Mask on first start**: Currently enabled by default. The alternative is starting in `report` mode (count findings without modifying requests) until the user confirms the output looks right. Already configurable via `"mode": "report"` or `/privacy report`.
+- [ ] **Fail closed when the detector is down**: Currently blocks outgoing messages if the detector cannot be reached. The alternative is sending unscreened with a warning. There is no setting for fail-open today; users must run `/privacy off` manually.
+- [ ] **Exclude URLs and dates by default**: Secrets, emails, phone numbers, person names, addresses, and account numbers are masked, while `private_url` and `private_date` are off by default because codebases contain many benign URLs and dates. Users can opt in by adding them to `"labels"`.
+- [ ] **Skip local models by default**: Requests to local models are not screened unless `"screenLocalModels": true` is set.
+- [ ] **Escape user-typed placeholders**: Typing `<SECRET_1>` in a message (or encountering it in a file or tool result) sends `<LITERAL_n>` and restores it verbatim. This prevents untrusted files or web pages from extracting stored secrets, though it also prevents users from referencing placeholders manually. Not currently configurable.
 
-## A faster path through the expert layers, as an option
+## Optional faster `bfloat16` path for expert layers
 
-The detector takes 35 to 45 ms for a text of up to 4,000 characters, and the
-privacy screen pays that for every text it has not seen before. Part of it
-is the same for every pass, however short the text: with bfloat16 weights,
-each pass converts the expert weights of every layer to float32, about 5 GB
-written. That follows the original's CPU path, the only one whose output
-could be recorded on a Mac to test against.
+`opf-mlx serve` takes 35–45 ms for texts up to 4,000 characters, which the privacy screen pays once per unseen text. A large portion of that fixed cost comes from upcasting every layer's `bfloat16` expert weights to `float32` on each forward pass (~5 GB written per pass). This matches OpenAI's PyTorch CPU path—the only reference path we could run locally on macOS to verify parity against.
 
-The original's CUDA path multiplies the expert layers in bfloat16. Doing the
-same here was tried once, on the gpu of an M5 Max:
+OpenAI's CUDA path instead multiplies the expert layers directly in `bfloat16`. A prototype of that path on an M5 Max GPU showed significant speedups:
 
-| Tokens | float32 experts, as now | bfloat16 experts |
+| Tokens | `float32` experts (current) | `bfloat16` experts (prototype) |
 |---:|---:|---:|
 | 128 | 29 ms | 9 ms |
 | 2,048 | 58 ms | 27 ms |
 | 8,192 | 173 ms | 94 ms |
 
-Both columns are from that trial, whose code was not kept. Against the
-original's CPU output on 60 passages the logits differed by 0.64 rms at the
-median instead of 0.61, and no label changed.
+(Both columns were measured during the same prototype run, which was not committed. Across 60 passages, median RMS logit difference against PyTorch CPU was `0.64` vs. `0.61` currently, with zero label changes.)
 
-- [ ] Build it as an option that is off by default: a flag of `opf-mlx`,
-  and so of `opf-mlx serve`, and an argument of `PrivacyFilter`. The
-  privacy screen can then ask for it through `server.command`.
-- [ ] Test it against the recorded outputs with a tolerance, since outputs
-  of its own cannot be recorded here, and keep the test that a row's result
-  is the same alone or in company.
-- [ ] Measure it again with the code in the repository, and measure what it
-  does to the service's time per text, which the trial did not.
-- [ ] Say in the README which path gives what.
+- [ ] Add this as an opt-in flag on `opf-mlx` (and `opf-mlx serve`) and a corresponding parameter on `PrivacyFilter`, so `pi-privacy-screen` can opt in via `server.command`.
+- [ ] Test it against the recorded golden outputs within an appropriate tolerance (since CUDA reference outputs cannot be recorded on macOS), and keep the invariance test verifying a token's expert output does not depend on other tokens in the batch.
+- [ ] Re-benchmark the committed implementation, including end-to-end `opf-mlx serve` latency per text.
+- [ ] Document the trade-offs between the two paths in `README.md`.
 
-Until then float32 weights avoid the conversion another way, at about twice
-the memory: `opf-mlx serve --dtype float32`. The benchmark has 14 ms instead
-of 29 at 128 tokens for the model alone. This has not been tried with the
-privacy screen.
+In the meantime, running `opf-mlx serve --dtype float32` avoids the per-pass weight conversion at ~2x memory usage (14 ms vs. 29 ms at 128 tokens in standalone benchmarks; not yet tested with `pi-privacy-screen`).
 
-## Type-check the extension
+## Add TypeScript type-checking for `pi-privacy-screen`
 
-`pi-privacy-screen` is TypeScript that no compiler has checked. Node runs it
-by stripping the types without checking them, and there is no compiler in
-this project's tooling. A type error that fails no test goes unnoticed.
+`pi-privacy-screen` is written in TypeScript, which Node executes directly by stripping type annotations without validating them. Because no TypeScript compiler is currently configured, type errors that don't break a test go unnoticed.
 
-- [ ] Check the extension by itself: `typescript` and `@types/node` as
-  development dependencies (its first dependencies of any kind), a
-  `tsconfig.json` for code that runs with its types stripped (`noEmit`,
-  `allowImportingTsExtensions`, `erasableSyntaxOnly`, `strict`), a
-  `typecheck` script, and fixes for what it reports.
-- [ ] Check it against Pi's types. The extension describes the part of Pi it
-  uses in an interface of its own (`Pi` in `src/index.ts`), with every event
-  typed `any`, so the first step cannot show a hook that is used differently
-  from how Pi declares it. Pi ships declarations (`ExtensionAPI` from
-  `@earendil-works/pi-coding-agent`). A type-only import of them is stripped
-  like the rest, so the extension would still need nothing installed to run.
+- [ ] Add standalone type-checking: install `typescript` and `@types/node` as dev dependencies (the extension's first dependencies), add a `tsconfig.json` compatible with Node type-stripping (`noEmit`, `allowImportingTsExtensions`, `erasableSyntaxOnly`, `strict`), add a `typecheck` npm script, and fix any reported errors.
+- [ ] Type-check against Pi's real declarations: replace the hand-written `Pi` interface in `src/index.ts` (which currently types hook events as `any`) with type-only imports of `ExtensionAPI` from `@earendil-works/pi-coding-agent`. Because type-only imports are stripped at runtime, the extension will still run with zero runtime dependencies.

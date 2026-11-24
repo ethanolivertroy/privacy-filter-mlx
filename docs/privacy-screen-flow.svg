@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1040" height="730" viewBox="0 0 1040 730" role="img" aria-labelledby="t d">
   <title id="t">Privacy screen for Pi: how a request is screened</title>
-  <desc id="d">Pi works on real text. Each request passes the extension, which asks the local detector opf-mlx serve for private spans, replaces every found value by a numbered placeholder, saves each pair in a table and sends the masked request to the model provider. The reply comes back with placeholders. The extension puts the real values back into the reply text and the tool arguments before Pi stores, shows or runs them. The session file, the table and the detector stay on this Mac. If the detector cannot be reached, nothing is sent.</desc>
+  <desc id="d">Pi works on real text locally. Each outgoing request passes through the extension, which queries the local detector opf-mlx serve for private spans, replaces each found value with a numbered placeholder, saves the mapping in a table, and sends the masked request to the model provider. When the reply returns with placeholders, the extension restores the real values in the reply text and tool arguments before Pi stores, displays, or runs them. The session file, placeholder table, and detector all stay on your Mac. If the detector cannot be reached, nothing is sent.</desc>
   <defs>
     <marker id="ah-local" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
       <path d="M0,1 L10,5 L0,9 z" class="ah-local"/>
@@ -96,8 +96,8 @@
   <!-- boxes -->
   <rect x="350" y="98" width="230" height="78" rx="10" class="ours"/>
   <text x="465" y="127" class="box-t mono">opf-mlx serve</text>
-  <text x="465" y="147" class="box-s">Privacy Filter model, running here</text>
-  <text x="465" y="164" class="box-s small dim">Unix socket, nothing on the network</text>
+  <text x="465" y="147" class="box-s">Local Privacy Filter model</text>
+  <text x="465" y="164" class="box-s small dim">Unix socket only (no network)</text>
 
   <rect x="40" y="250" width="170" height="386" rx="10" class="pi"/>
   <text x="125" y="284" class="box-t">Pi agent</text>
@@ -120,7 +120,7 @@
   <text x="465" y="468" class="box-s small dim">saved with the session</text>
 
   <rect x="350" y="550" width="230" height="86" rx="10" class="ours"/>
-  <text x="465" y="579" class="box-t">Put values back</text>
+  <text x="465" y="579" class="box-t">Restore values</text>
   <text x="465" y="599" class="box-s">reply text, tool arguments</text>
   <text x="465" y="618" class="box-s small dim mono">message_end, tool_call</text>
 
@@ -153,6 +153,6 @@
   <text x="268" y="575" class="lbl mid">real values</text>
   <text x="268" y="616" class="lbl mid small dim">stored, shown, run</text>
 
-  <text x="38" y="684" class="leg">The session file, the placeholder table and the detector stay on this Mac. The model provider is sent the masked request.</text>
+  <text x="38" y="684" class="leg">The session file, placeholder table, and detector stay on your Mac. The model provider receives only the masked request.</text>
   <text x="38" y="701" class="leg">If the detector cannot be reached, nothing is sent.</text>
 </svg>

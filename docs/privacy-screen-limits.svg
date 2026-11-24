@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1040" height="616" viewBox="0 0 1040 616" role="img" aria-labelledby="t d">
   <title id="t">Privacy screen for Pi: what it covers, and what gets past it</title>
-  <desc id="d">Three ways out of the machine. One is screened: the requests Pi sends to a model provider pass the privacy screen and go out masked. Even there some things go through unmasked: what the detector misses, images, values that are encoded, hashed or split over lines, names that stand only in the system prompt, and text another extension adds after the screen ran. Two ways are not screened at all: tools run with the real values and send whatever they send, for example with curl, git push, uploads or web fetches; and other extensions can make model calls of their own.</desc>
+  <desc id="d">Three ways data can leave your Mac. One is screened: requests Pi sends to a model provider pass through the privacy screen and leave masked—except for values missed by the detector, images, values that are encoded, hashed, or split across lines, names appearing only in the system prompt, and text added by another extension afterwards. Two paths are not screened at all: local tools run with real values and send whatever they send (for example via curl, git push, uploads, or web fetches), and other extensions can make their own direct model calls.</desc>
   <defs>
     <marker id="ah-local" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
       <path d="M0,1 L10,5 L0,9 z" class="ah-local"/>
@@ -112,28 +112,28 @@
   <!-- what the screen itself lets through -->
   <rect x="250" y="212" width="350" height="122" rx="10" class="warn"/>
   <text x="268" y="236" class="warn-t">Goes through the screen unmasked</text>
-  <text x="268" y="258" class="warn-s">what the detector misses, and images</text>
-  <text x="268" y="277" class="warn-s">values that are encoded, hashed or split over lines</text>
-  <text x="268" y="296" class="warn-s">names that stand only in the system prompt</text>
-  <text x="268" y="315" class="warn-s">text another extension adds after the screen ran</text>
+  <text x="268" y="258" class="warn-s">values missed by the detector, and images</text>
+  <text x="268" y="277" class="warn-s">values that are encoded, hashed, or split across lines</text>
+  <text x="268" y="296" class="warn-s">names that appear only in the system prompt</text>
+  <text x="268" y="315" class="warn-s">text added by another extension afterwards</text>
 
   <!-- tools -->
   <rect x="740" y="344" width="250" height="76" rx="10" class="out"/>
-  <text x="865" y="376" class="box-t">Wherever a tool sends</text>
+  <text x="865" y="376" class="box-t">Tool destinations</text>
   <text x="865" y="397" class="box-s">curl, git push, uploads, web fetches</text>
-  <text x="435" y="365" class="lbl mid">tools run with the real values</text>
-  <text x="435" y="403" class="lbl mid sub dim">the screen does not judge what a tool call does</text>
+  <text x="435" y="365" class="lbl mid">tools run with real values</text>
+  <text x="435" y="403" class="lbl mid sub dim">the screen does not inspect what tools do</text>
 
   <!-- other extensions -->
   <rect x="40" y="452" width="170" height="76" rx="10" class="pi"/>
   <text x="125" y="484" class="box-t">Other extensions</text>
   <text x="125" y="505" class="box-s">their own code</text>
   <rect x="740" y="452" width="250" height="76" rx="10" class="out"/>
-  <text x="865" y="484" class="box-t">Whatever they call</text>
-  <text x="865" y="505" class="box-s">any model or API</text>
-  <text x="435" y="473" class="lbl mid">model calls an extension makes itself</text>
-  <text x="435" y="511" class="lbl mid sub dim">they do not pass through Pi's agent loop</text>
+  <text x="865" y="484" class="box-t">External APIs</text>
+  <text x="865" y="505" class="box-s">any model or endpoint</text>
+  <text x="435" y="473" class="lbl mid">direct model calls from other extensions</text>
+  <text x="435" y="511" class="lbl mid sub dim">these bypass Pi's agent loop</text>
 
-  <text x="24" y="578" class="leg">Also: a model on this Mac is not screened unless you ask for it. The session file holds the real conversation and the placeholder table.</text>
-  <text x="24" y="596" class="leg">Detection is a model and a set of patterns. It reduces what leaves; it does not guarantee it.</text>
+  <text x="24" y="578" class="leg">Note: local models are not screened unless configured. The session file stores the real conversation and placeholder table.</text>
+  <text x="24" y="596" class="leg">Detection relies on a model and pattern rules. It reduces what leaves your Mac—it is not a guarantee.</text>
 </svg>
