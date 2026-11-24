@@ -52,7 +52,7 @@ def labels_to_spans(labels: Sequence[int], space: LabelSpace) -> list[Span]:
 
     for index, label in enumerate(labels):
         span_class, tag = space.span_of[label], space.tag_of[label]
-        if tag is None:  # background
+        if tag is None:
             close(index)
         elif tag == "S":
             close(index)
@@ -64,11 +64,12 @@ def labels_to_spans(labels: Sequence[int], space: LabelSpace) -> list[Span]:
             if open_class != span_class:
                 close(index)
                 open_class, open_start = span_class, index
-        elif open_class == span_class:  # "E" ending the open span
-            close(index + 1)
-        else:  # "E" with nothing matching to end
-            close(index)
-            spans.append((span_class, index, index + 1))
+        elif tag == "E":
+            if open_class == span_class:
+                close(index + 1)
+            else:
+                close(index)
+                spans.append((span_class, index, index + 1))
 
     close(len(labels))
     return spans

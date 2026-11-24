@@ -1,5 +1,3 @@
-"""Splitting a long token sequence into model calls."""
-
 import math
 import random
 
@@ -48,16 +46,10 @@ def test_original_policy_never_drops_or_repeats_a_token(n_tokens, n_ctx):
     assert all(0 < w.stop - w.start <= n_ctx for w in windows)
 
 
-# --- halo policy -----------------------------------------------------------
-# The halo policy gives every kept token `halo` tokens of context on each side
-# (or as many as the text has), so predictions do not depend on where the
-# windows fall.
-
 HALO_SHAPES = [(100, 20, 4), (101, 20, 4), (37, 12, 5), (9, 20, 4), (64, 9, 4)]
 
 
 def _random_shapes(count: int) -> list[tuple[int, int, int]]:
-    """(n_tokens, n_ctx, halo) triples in which `n_ctx` has room for a kept token."""
     rng = random.Random(20261123)
     shapes = []
     for _ in range(count):
@@ -67,8 +59,6 @@ def _random_shapes(count: int) -> list[tuple[int, int, int]]:
 
 
 def test_halo_policy_keeps_all_of_a_window_but_its_halos():
-    # 30 tokens, 12 per window, 3 of context on each side. The first window has
-    # no left halo to pay for and the last no right one.
     assert plan_windows(30, 12, policy="halo", halo=3) == [
         Window(start=0, stop=12, keep_start=0, keep_stop=9),
         Window(start=6, stop=18, keep_start=9, keep_stop=15),
@@ -111,8 +101,6 @@ def test_halo_policy_holds_its_contract_for_any_shape():
 
 
 def test_halo_policy_uses_as_few_windows_as_possible():
-    # A window that reaches neither end of the text keeps at most n_ctx - 2 * halo
-    # tokens; the first and the last keep at most n_ctx - halo.
     for n_tokens, n_ctx, halo in _random_shapes(2000):
         if n_tokens <= n_ctx:
             fewest = 1
@@ -134,8 +122,6 @@ def test_halo_policy_with_no_tokens_means_no_windows():
 @pytest.mark.parametrize("n_tokens", [100, 5, 0])
 @pytest.mark.parametrize("n_ctx, halo", [(8, 4), (7, 4), (1, 1)])
 def test_halo_policy_needs_room_for_at_least_one_kept_token(n_tokens, n_ctx, halo):
-    # The answer does not depend on the text: a setting that cannot work for a
-    # long input is refused for a short one too, so it is found on the first call.
     with pytest.raises(ValueError, match=f"halo.*n_ctx of at least {2 * halo + 1}"):
         plan_windows(n_tokens, n_ctx, policy="halo", halo=halo)
 

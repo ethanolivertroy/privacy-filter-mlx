@@ -1,5 +1,3 @@
-"""Checkpoint tensor inventory, validation and loading."""
-
 import json
 import struct
 
@@ -25,8 +23,6 @@ def weights(cfg) -> dict[str, mx.array]:
 def test_schema_for_the_released_config_matches_the_checkpoint_inventory(released_config):
     schema = expected_tensors(ModelConfig.from_dict(released_config))
 
-    # 107 tensors and 1,399,486,832 parameters are what the header of the
-    # released original/model.safetensors contains.
     assert len(schema) == 107
     assert sum(int(np.prod(spec.shape)) for spec in schema.values()) == 1_399_486_832
     assert schema["embedding.weight"].shape == (200064, 640)
@@ -49,9 +45,6 @@ def test_stream_tensors_must_be_stored_at_the_configured_precision(released_conf
 
     assert schema["embedding.weight"].dtypes == ("bfloat16",)
     assert schema["block.0.mlp.swiglu.weight"].dtypes == ("bfloat16",)
-    # The reference holds these two kinds in float32 parameters, so either
-    # storage dtype loads without loss. The released file stores the sinks as
-    # F32 and the norm scales as BF16.
     assert set(schema["block.0.attn.sinks"].dtypes) == {"float32", "bfloat16"}
     assert set(schema["block.0.attn.norm.scale"].dtypes) == {"float32", "bfloat16"}
 
@@ -182,7 +175,7 @@ def test_file_that_is_not_safetensors_is_rejected(tmp_path):
 
 
 def test_header_whose_byte_ranges_disagree_with_the_shapes_is_rejected(tmp_path):
-    header = {"w": {"dtype": "F32", "shape": [2, 3], "data_offsets": [0, 20]}}  # needs 24 bytes
+    header = {"w": {"dtype": "F32", "shape": [2, 3], "data_offsets": [0, 20]}}
     blob = json.dumps(header).encode()
     path = tmp_path / "model.safetensors"
     path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(20))

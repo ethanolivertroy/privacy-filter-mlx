@@ -1,12 +1,3 @@
-"""Span reconstruction and redaction.
-
-Token class ids used below come from the released (v2) label space, where class
-`1 + 4 * category + boundary` is boundary B/I/E/S of a category:
-private_email (span class 4) is 13..16 and private_person (span class 5) is
-17..20. The expected spans were worked out by hand from the reference state
-machine in `opf/_core/spans.py`.
-"""
-
 import pytest
 
 from opf_mlx.labels import resolve_label_space

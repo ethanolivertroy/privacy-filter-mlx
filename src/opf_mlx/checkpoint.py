@@ -181,18 +181,17 @@ def _require_complete(path: Path) -> None:
 
 
 def _fetch(url: str, destination: Path, remote: RemoteFile, progress: Progress | None) -> None:
-    """Download one file to `<destination>.part`, verify it, then move it into place."""
     name = destination.name
     part = destination.with_name(name + ".part")
     offset = part.stat().st_size if part.exists() else 0
-    if offset >= remote.size:  # a leftover that cannot be a prefix of the file
+    if offset >= remote.size:
         part.unlink()
         offset = 0
 
     request = urllib.request.Request(url, headers={"Range": f"bytes={offset}-"} if offset else {})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
-            resumed = offset > 0 and response.status == 206  # a server may ignore Range and send it all
+            resumed = offset > 0 and response.status == 206
             written = offset if resumed else 0
             with part.open("ab" if resumed else "wb") as out:
                 while chunk := response.read(1 << 20):

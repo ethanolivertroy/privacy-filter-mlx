@@ -82,11 +82,11 @@ class LabelError(ValueError):
 class LabelSpace:
     """Token classes (what the model outputs) and span classes (what users see)."""
 
-    class_names: tuple[str, ...]  # index = model output class, e.g. "B-private_person"
-    span_names: tuple[str, ...]  # index = span class; 0 is always "O"
-    span_of: tuple[int, ...]  # token class -> span class
-    tag_of: tuple[str | None, ...]  # token class -> "B" / "I" / "E" / "S", None for background
-    background: int  # token class of "O"
+    class_names: tuple[str, ...]
+    span_names: tuple[str, ...]
+    span_of: tuple[int, ...]
+    tag_of: tuple[str | None, ...]
+    background: int
     category_version: str
 
 

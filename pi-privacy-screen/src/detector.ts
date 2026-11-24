@@ -1,22 +1,3 @@
-/**
- * The way to the detector: `opf-mlx serve` on a Unix socket of this machine.
- *
- *   GET  /health     -> {"status": "ok", "api": 1, ...}
- *   POST /v1/detect  <- {"texts": [...], "offsets": "utf16"}
- *                    -> {"results": [{"spans": [{"start", "end", "label"}]}]}
- *
- * `detect` has the shape `Screen` asks for. It rejects when the detector
- * cannot be reached at all, and gives an Error in place of the spans for a
- * single text that could not be checked; either way the caller knows exactly
- * which texts have not been looked at. A text is never cut short to make it
- * fit, and an answer that cannot be right (a wrong count, a span outside its
- * text) is not used.
- *
- * A detector that is not running is started, if the settings allow it. It is
- * shared: other Pi sessions use the same one, so it is never stopped from
- * here; it exits by itself after `idleExit` seconds without a request.
- */
-
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { request } from "node:http";
@@ -28,22 +9,16 @@ import type { Span } from "./spans.ts";
 export const API_VERSION = 1;
 const PROBE_MS = 1500;
 const POLL_MS = 150;
-/** After a failed start, the detector is not started again for this long, unless `retry` is called. */
 const COOL_DOWN_MS = 30_000;
 
 export interface DetectorOptions {
 	socket: string;
-	/** The command that starts the detector; `--socket` and `--idle-exit` are added to it. */
 	command: string[] | undefined;
 	autoStart: boolean;
 	idleExit: number;
-	/** Seconds to wait for a detector started here. */
 	startTimeout: number;
-	/** At most this many texts in one request (default 64). */
 	batchTexts?: number;
-	/** A request holds at most this many bytes of text, unless one text alone is larger (default 1 MiB). */
 	batchBytes?: number;
-	/** A text larger than this is not checked (default 8 MiB). */
 	maxTextBytes?: number;
 }
 
@@ -56,7 +31,6 @@ export interface Health {
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** One request over the socket. Rejects if the detector cannot be reached or does not answer in time. */
 function call(socket: string, method: "GET" | "POST", path: string, body: unknown, timeoutMs: number): Promise<{ status: number; body: unknown }> {
 	return new Promise((resolve, reject) => {
 		const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
@@ -83,7 +57,6 @@ function call(socket: string, method: "GET" | "POST", path: string, body: unknow
 	});
 }
 
-/** The spans for each text out of an answer, or an Error where the answer cannot be right. */
 function readResults(texts: readonly string[], body: unknown): (Span[] | Error)[] {
 	const unusable = () => new Error("the detector's answer could not be used");
 	if (!isRecord(body) || !Array.isArray(body.results) || body.results.length !== texts.length) return texts.map(unusable);
@@ -102,14 +75,17 @@ function readResults(texts: readonly string[], body: unknown): (Span[] | Error)[
 	});
 }
 
-/** The last lines a detector wrote before it gave up: its own words, never a user's text. */
 function tail(logPath: string): string {
 	try {
-		const lines = readFileSync(logPath, "utf8").slice(-2000).split("\n").map((line) => line.trim()).filter(Boolean); // fmt: skip
+		const lines = readFileSync(logPath, "utf8").slice(-2000).split("\n").map((line) => line.trim()).filter(Boolean);
 		return lines.length > 0 ? `: ${lines.slice(-3).join(" / ")}` : "";
 	} catch {
 		return "";
 	}
+}
+
+function lostSocketOwnershipRace(logPath: string): boolean {
+	return /already owns/.test(tail(logPath));
 }
 
 export class Detector {
@@ -123,12 +99,10 @@ export class Detector {
 		this.onStart = onStart;
 	}
 
-	/** What the detector says about itself, or undefined if none that this extension can use is running. */
 	async health(): Promise<Health | undefined> {
 		return (await this.probe()).health;
 	}
 
-	/** A detector that answers, started if need be. Rejects with the reason, in words for the user. */
 	async ensure(): Promise<Health> {
 		const { health, reason } = await this.probe();
 		if (health) {
@@ -150,7 +124,6 @@ export class Detector {
 		return this.starting;
 	}
 
-	/** Forget a failed start, so that the next request tries again. */
 	retry(): void {
 		this.failed = undefined;
 	}
@@ -164,7 +137,7 @@ export class Detector {
 		let bytes = 0;
 		const send = async () => {
 			if (batch.length === 0) return;
-			const answers = await this.ask(batch.map((index) => texts[index]!), bytes); // fmt: skip
+			const answers = await this.ask(batch.map((index) => texts[index]!), bytes);
 			batch.forEach((index, at) => (results[index] = answers[at]!));
 			batch = [];
 			bytes = 0;
@@ -183,7 +156,6 @@ export class Detector {
 		return results;
 	};
 
-	/** One request. A request that fails as a whole is repeated text by text, so that only the text at fault goes unchecked. */
 	private async ask(texts: string[], bytes: number): Promise<(Span[] | Error)[]> {
 		const timeoutMs = 120_000 + bytes / 4;
 		let answer: { status: number; body: unknown };
@@ -242,8 +214,7 @@ export class Detector {
 			const { health, reason } = await this.probe();
 			if (health) return health;
 			if (reason) throw new Error(reason);
-			// Another session may have started one at the same moment; then ours steps aside and theirs comes up.
-			if (ended !== undefined && !/already owns/.test(tail(logPath))) {
+			if (ended !== undefined && !lostSocketOwnershipRace(logPath)) {
 				throw new Error(`the detector could not be started (${ended})${tail(logPath)}`);
 			}
 			if (Date.now() >= deadline) throw new Error(`the detector was started but did not come up within ${startTimeout} s; see ${logPath}`);

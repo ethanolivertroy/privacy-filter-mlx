@@ -15,19 +15,20 @@ a GPU without the mode simply passes the measurement.
 
 from __future__ import annotations
 
+import math
 import os
 
 import mlx.core as mx
 import numpy as np
 
+from .model import ExpertLinear
+
 ENV_VAR = "MLX_ENABLE_TF32"
 
-# Accurate float32 products of the probe sizes are within about 1e-6 of exact;
-# the reduced-precision mode is off by 6e-4 or more.
 TOLERANCE = 1e-5
 
-_PROBE_SHAPES = ((1, 640, 640), (64, 64, 64), (300, 640, 1280))  # rows, inner, columns
-_GROUPED_PROBE_SHAPES = ((3, 40, 640, 1280), (5, 40, 640, 640))  # experts, rows, inner, columns
+_PROBE_SHAPES = ((1, 640, 640), (64, 64, 64), (300, 640, 1280))
+_GROUPED_PROBE_SHAPES = ((3, 40, 640, 1280), (5, 40, 640, 640))
 
 
 class PrecisionError(RuntimeError):
@@ -60,8 +61,6 @@ def float32_grouped_product_error() -> float:
     same M5 Max: 8e-4 with the reduced-precision mode on, 1e-6 with it off.
     The layer measured is the one the model uses.
     """
-    from .model import ExpertLinear  # not at import time: nothing may compute before the switch is set
-
     rng = np.random.default_rng(0)
     worst = 0.0
     for experts, rows, inner, columns in _GROUPED_PROBE_SHAPES:
@@ -84,7 +83,7 @@ def float32_product_error() -> float:
 def require_full_precision() -> float:
     """Measure float32 products on the current device; raise `PrecisionError` if they are inaccurate."""
     error = float32_product_error()
-    if not error <= TOLERANCE:  # written this way so that NaN fails too
+    if math.isnan(error) or error > TOLERANCE:
         raise PrecisionError(
             f"float32 matrix products on this device run at reduced precision (relative error {error:.1e}, "
             f"expected below {TOLERANCE:.0e}). MLX enables this by default on GPUs with neural accelerators and "

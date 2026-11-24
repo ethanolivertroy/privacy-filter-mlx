@@ -5,7 +5,6 @@ import { ALL_LABELS, DEFAULT_LABELS, cleanSpans } from "../src/spans.ts";
 
 const labels = new Set(DEFAULT_LABELS);
 
-/** Clean the span that covers `raw` inside `text` and return what is left of it. */
 function clean(text: string, raw: string, label: string, enabled: ReadonlySet<string> = labels): string[] {
 	const start = text.indexOf(raw);
 	assert.notEqual(start, -1, `"${raw}" is not in the text`);
@@ -37,7 +36,6 @@ test("labels that are not screened are dropped", () => {
 });
 
 test("the syntax around a value is not part of it", () => {
-	// Each of these is a span the real model returned for a made-up sample.
 	assert.deepEqual(clean("MAIL=support@example.com\n", "=support@example.com", "private_email"), ["support@example.com"]);
 	assert.deepEqual(clean("<lena.fischer@example.com>, x", "lena.fischer@example.com>,", "private_email"), ["lena.fischer@example.com"]);
 	assert.deepEqual(clean('PHONE="+81 90-5550-0199"', '="+81 90-5550-0199', "private_phone"), ["+81 90-5550-0199"]);
@@ -47,9 +45,6 @@ test("the syntax around a value is not part of it", () => {
 });
 
 test("the escaping around a value is not part of it", () => {
-	// Text that is itself inside a quoted string (JSON, a tool call written out) has its quotes escaped. Should
-	// the model take such a quote into a span, the backslash goes with it. (Made-up spans: on samples like these
-	// the real model returned the value alone.)
 	const call = String.raw`bash(command="echo \"token: ghx_x7KqLm29ZpQrStUvWxYz0123456789\" >> deploy.log")`;
 	assert.deepEqual(clean(call, String.raw`ghx_x7KqLm29ZpQrStUvWxYz0123456789\"`, "secret"), ["ghx_x7KqLm29ZpQrStUvWxYz0123456789"]);
 	assert.deepEqual(clean(String.raw`echo \"ghx_x7KqLm29ZpQrStUvWxYz0123456789\"`, "ghx_x7KqLm29ZpQrStUvWxYz0123456789\\", "secret"), ["ghx_x7KqLm29ZpQrStUvWxYz0123456789"]);
@@ -63,7 +58,6 @@ test("a backslash inside a value stays", () => {
 });
 
 test("a long span without an address in it is not read over and over", () => {
-	// What the model marks is usually short, but nothing promises that.
 	for (const text of ["a.".repeat(60_000), "a".repeat(120_000), "a@".repeat(60_000)]) {
 		const start = performance.now();
 		assert.deepEqual(clean(text, text, "private_email"), []);

@@ -98,7 +98,7 @@ def test_custom_token_names_missing_a_boundary_are_rejected(released_config):
 
 
 def test_custom_names_must_match_num_labels(released_config):
-    released_config["span_class_names"] = ["O", "x"]  # expands to 5 classes, not 33
+    released_config["span_class_names"] = ["O", "x"]
 
     with pytest.raises(LabelError, match="num_labels"):
         resolve_label_space(released_config)

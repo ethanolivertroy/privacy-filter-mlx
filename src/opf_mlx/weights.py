@@ -18,7 +18,6 @@ import mlx.core as mx
 
 from .config import ModelConfig
 
-# safetensors dtype code -> (name, bytes per element)
 _SAFETENSORS_DTYPES: dict[str, tuple[str, int]] = {
     "BF16": ("bfloat16", 2),
     "F16": ("float16", 2),
@@ -47,7 +46,12 @@ class TensorSpec:
     """What the model requires of one tensor."""
 
     shape: tuple[int, ...]
-    dtypes: tuple[str, ...]  # accepted storage dtypes; the first is the released file's
+    dtypes: tuple[str, ...]
+    default_dtype: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.default_dtype:
+            object.__setattr__(self, "default_dtype", self.dtypes[0])
 
 
 @dataclass(frozen=True)
@@ -74,24 +78,24 @@ def expected_tensors(config: ModelConfig) -> dict[str, TensorSpec]:
     either = tuple(dict.fromkeys((config.param_dtype, "float32", "bfloat16")))
     d, e = config.hidden_size, config.num_experts
 
-    tensors: dict[str, TensorSpec] = {"embedding.weight": TensorSpec((config.vocab_size, d), stream)}
+    tensors: dict[str, TensorSpec] = {"embedding.weight": TensorSpec((config.vocab_size, d), stream, config.param_dtype)}
     for n in range(config.num_hidden_layers):
         attn, mlp = f"block.{n}.attn", f"block.{n}.mlp"
-        tensors[f"{attn}.norm.scale"] = TensorSpec((d,), either)
-        tensors[f"{attn}.qkv.weight"] = TensorSpec((config.qkv_size, d), stream)
-        tensors[f"{attn}.qkv.bias"] = TensorSpec((config.qkv_size,), stream)
-        tensors[f"{attn}.sinks"] = TensorSpec((config.num_attention_heads,), ("float32", "bfloat16"))
-        tensors[f"{attn}.out.weight"] = TensorSpec((d, config.attention_width), stream)
-        tensors[f"{attn}.out.bias"] = TensorSpec((d,), stream)
-        tensors[f"{mlp}.norm.scale"] = TensorSpec((d,), either)
-        tensors[f"{mlp}.gate.weight"] = TensorSpec((e, d), stream)
-        tensors[f"{mlp}.gate.bias"] = TensorSpec((e,), stream)
-        tensors[f"{mlp}.swiglu.weight"] = TensorSpec((e, d, 2 * config.intermediate_size), stream)
-        tensors[f"{mlp}.swiglu.bias"] = TensorSpec((e, 2 * config.intermediate_size), stream)
-        tensors[f"{mlp}.out.weight"] = TensorSpec((e, config.intermediate_size, d), stream)
-        tensors[f"{mlp}.out.bias"] = TensorSpec((e, d), stream)
-    tensors["norm.scale"] = TensorSpec((d,), either)
-    tensors["unembedding.weight"] = TensorSpec((config.num_labels, d), stream)
+        tensors[f"{attn}.norm.scale"] = TensorSpec((d,), either, config.param_dtype)
+        tensors[f"{attn}.qkv.weight"] = TensorSpec((config.qkv_size, d), stream, config.param_dtype)
+        tensors[f"{attn}.qkv.bias"] = TensorSpec((config.qkv_size,), stream, config.param_dtype)
+        tensors[f"{attn}.sinks"] = TensorSpec((config.num_attention_heads,), ("float32", "bfloat16"), "float32")
+        tensors[f"{attn}.out.weight"] = TensorSpec((d, config.attention_width), stream, config.param_dtype)
+        tensors[f"{attn}.out.bias"] = TensorSpec((d,), stream, config.param_dtype)
+        tensors[f"{mlp}.norm.scale"] = TensorSpec((d,), either, config.param_dtype)
+        tensors[f"{mlp}.gate.weight"] = TensorSpec((e, d), stream, config.param_dtype)
+        tensors[f"{mlp}.gate.bias"] = TensorSpec((e,), stream, config.param_dtype)
+        tensors[f"{mlp}.swiglu.weight"] = TensorSpec((e, d, 2 * config.intermediate_size), stream, config.param_dtype)
+        tensors[f"{mlp}.swiglu.bias"] = TensorSpec((e, 2 * config.intermediate_size), stream, config.param_dtype)
+        tensors[f"{mlp}.out.weight"] = TensorSpec((e, config.intermediate_size, d), stream, config.param_dtype)
+        tensors[f"{mlp}.out.bias"] = TensorSpec((e, d), stream, config.param_dtype)
+    tensors["norm.scale"] = TensorSpec((d,), either, config.param_dtype)
+    tensors["unembedding.weight"] = TensorSpec((config.num_labels, d), stream, config.param_dtype)
     return tensors
 
 
@@ -99,7 +103,7 @@ def weights_nbytes(config: ModelConfig, dtype: str | None = None) -> int:
     """Memory the loaded weights occupy at `dtype` (default: as stored in the released layout)."""
     total = 0
     for spec in expected_tensors(config).values():
-        total += math.prod(spec.shape) * _ITEM_SIZE[dtype or spec.dtypes[0]]
+        total += math.prod(spec.shape) * _ITEM_SIZE[dtype or spec.default_dtype]
     return total
 
 
@@ -207,7 +211,6 @@ def load_weights(checkpoint_dir: str | Path, config: ModelConfig, *, dtype: str 
     for file in sorted({entry.file for entry in found.values()}):
         loaded.update(mx.load(str(file)))
 
-    # The header was validated; check that what the loader produced agrees with it.
     weights: dict[str, mx.array] = {}
     for name in expected:
         array, entry = loaded[name], found[name]

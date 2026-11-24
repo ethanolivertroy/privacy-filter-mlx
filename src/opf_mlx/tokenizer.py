@@ -42,7 +42,6 @@ class Tokenizer:
         if not token_bytes:
             return text, [], []
 
-        # Byte position where each character of the decoded text starts and ends.
         char_byte_starts: list[int] = []
         char_byte_ends: list[int] = []
         cursor = 0

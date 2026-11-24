@@ -36,9 +36,9 @@ class Environment:
     memory_total: int | None
     memory_available: int | None
     gpu_name: str | None
-    gpu_memory_limit: int | None  # MLX's recommended working-set ceiling
-    gpu_max_buffer: int | None  # largest single MLX allocation
-    float32_matmul_error: float | None  # measured on the default device; see opf_mlx.precision
+    gpu_memory_limit: int | None
+    gpu_max_buffer: int | None
+    float32_matmul_error: float | None
     macos_version: str
     macos_build: str | None
     python_version: str

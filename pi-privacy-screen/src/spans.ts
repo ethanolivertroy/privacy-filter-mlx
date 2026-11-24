@@ -1,18 +1,6 @@
-/**
- * From what the model flags to what gets a placeholder.
- *
- * The model marks spans of tokens, and a token often carries the syntax next
- * to a value: `=support@example.com`, `lena@example.com>,`, a whole
- * `NAME=value` pair, two lines at once. A placeholder must stand for the value
- * alone, or putting it back would not reproduce the text. `cleanSpans` trims
- * each span down to its value and drops spans that cannot be what their label
- * says.
- */
-
 import type { Found } from "./patterns.ts";
 import type { Kind } from "./vault.ts";
 
-/** A span as the detection service reports it. Offsets are UTF-16 code units. */
 export interface Span {
 	start: number;
 	end: number;
@@ -30,13 +18,12 @@ export const KIND_OF_LABEL: Readonly<Record<string, Kind>> = {
 	private_date: "DATE",
 };
 export const ALL_LABELS: readonly string[] = Object.keys(KIND_OF_LABEL);
-/** URLs and dates are left out: code is full of them, and hiding them costs the model more than it protects. */
 export const DEFAULT_LABELS: readonly string[] = ["secret", "private_email", "private_phone", "private_person", "private_address", "account_number"];
 
 // The part before the "@" is at most 64 characters long. Without that bound, a long span with no address in it
 // would be read to its end from every one of its positions.
 const EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/;
-const ASSIGNED_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*["']?\s*[=:](?!\/\/)\s*/; // `NAME=` or `name:`, but not `scheme://`
+const ASSIGNED_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*["']?\s*[=:](?!\/\/)\s*/;
 
 const LEADING = /[\s"'`([{<=:,;]/;
 const TRAILING = /[\s"'`)\]}>,;:.]/;
@@ -60,7 +47,6 @@ export function cleanSpans(text: string, spans: readonly Span[], labels: Readonl
 	return found.sort((a, b) => a.start - b.start || b.end - a.end);
 }
 
-/** A value never runs across a line break: one range per line of the span. */
 function lines(text: string, start: number, end: number): Range[] {
 	const ranges: Range[] = [];
 	let from = start;
@@ -73,10 +59,6 @@ function lines(text: string, start: number, end: number): Range[] {
 	return ranges;
 }
 
-/**
- * Without the syntax at its edges. In text that is itself inside a quoted string (JSON, a tool call written
- * out) that syntax is escaped, and the backslash goes with what it escapes: `\"value\"` is `value`.
- */
 function trim(text: string, [start, end]: Range, leading = LEADING, trailing = TRAILING): Range {
 	for (;;) {
 		if (start < end && leading.test(text[start]!)) start++;
@@ -104,7 +86,6 @@ function narrow(text: string, range: Range, label: string): Range | undefined {
 			const name = ASSIGNED_NAME.exec(value());
 			if (name) [start, end] = trim(text, [start + name[0].length, end]);
 			if (/\s/.test(value())) {
-				// "commit 9f8e...", "Bearer abc...": a word in front of a long token is not part of it.
 				const words = [...value().matchAll(/\S+/g)];
 				const longest = words.reduce((a, b) => (b[0].length > a[0].length ? b : a));
 				if (longest[0].length >= 16 && /[0-9]/.test(longest[0])) {

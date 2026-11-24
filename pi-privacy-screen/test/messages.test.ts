@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { WITHHELD, sweepPayload, transcript, unmaskAssistant, unmaskInput } from "../src/messages.ts";
+import { WITHHELD, sweepPayload, transcript, unmaskAssistant, unmaskInputInPlace } from "../src/messages.ts";
 import type { Message } from "../src/messages.ts";
 import { Screen } from "../src/screen.ts";
 import type { Span } from "../src/spans.ts";
 
 const EMAIL = "lena@example.com";
 
-/** A screen whose detector flags the address above, and nothing else. */
 function emailScreen(down = false): Screen {
 	return new Screen(async (texts) => {
 		if (down) throw new Error("connect ENOENT");
@@ -75,7 +74,7 @@ test("every text that reaches the provider is masked, and nothing else is touche
 	const input = conversation();
 	const before = structuredClone(input.map((message) => ({ ...message, toolsAdded: undefined })));
 
-	const { messages, withheld } = await masked(emailScreen(), input); // to a provider that wrote none of it
+	const { messages, withheld } = await masked(emailScreen(), input);
 
 	const e = "<EMAIL_1>";
 	assert.equal(withheld, 0);
@@ -148,7 +147,7 @@ test("what another model thought is checked like what it said; a provider's own 
 	const thought = (provider: string): Message => ({
 		role: "assistant",
 		provider,
-		content: [{ type: "thinking", thinking: `the user means ${EMAIL}`, thinkingSignature: "sig" }, { type: "text", text: "ok" }], // fmt: skip
+		content: [{ type: "thinking", thinking: `the user means ${EMAIL}`, thinkingSignature: "sig" }, { type: "text", text: "ok" }],
 	});
 	const messages = [thought("acme"), thought("llama")];
 	const thinking = (result: { messages: Message[] }, index: number) => (result.messages[index]!.content as { thinking?: string }[])[0]!;
@@ -232,7 +231,7 @@ test("the tool calls of a reply get their values where that is safe, and are lef
 test("arguments are given their values once: what merely looks like a placeholder afterwards is left alone", () => {
 	const screen = emailScreen();
 	screen.vault.allocate("SECRET", "hunter22x!");
-	screen.vault.allocate("LITERAL", "<SECRET_1>"); // text from a file that only looked like a placeholder
+	screen.vault.allocate("LITERAL", "<SECRET_1>");
 	const written = { note: "the file said <LITERAL_1>", key: "<SECRET_1>" };
 	const reply: Message = { role: "assistant", content: [{ type: "toolCall", id: "a", name: "write", arguments: written }] };
 
@@ -240,8 +239,8 @@ test("arguments are given their values once: what merely looks like a placeholde
 	const stored = structuredClone((message.content as { arguments: typeof written }[])[0]!.arguments);
 	const asStored = structuredClone(stored);
 	const asWritten = structuredClone(written);
-	unmaskInput(asStored, screen, [], { settled: settled.get("a") });
-	unmaskInput(asWritten, screen, [], { settled: settled.get("a") });
+	unmaskInputInPlace(asStored, screen, [], { settled: settled.get("a") });
+	unmaskInputInPlace(asWritten, screen, [], { settled: settled.get("a") });
 
 	assert.deepEqual(stored, { note: "the file said <SECRET_1>", key: "hunter22x!" });
 	assert.deepEqual(asStored, stored, "run with the arguments as stored: nothing more happens");
@@ -263,9 +262,9 @@ test("the arguments of a tool call get their values, in place, and go back out a
 	const written = { path: "/tmp/<PERSON_1>.txt", content: "Dear <PERSON_1>,\n<SECRET_9>", edits: [{ oldText: "<PERSON_1>", newText: "x" }], limit: 3 };
 	const input = structuredClone(written);
 
-	const refusal = unmaskInput(input, screen, []);
+	const result = unmaskInputInPlace(input, screen, []);
 
-	assert.equal(refusal, undefined);
+	assert.deepEqual(result, { ok: true });
 	assert.deepEqual(input, { path: "/tmp/Lena.txt", content: "Dear Lena,\n<SECRET_9>", edits: [{ oldText: "Lena", newText: "x" }], limit: 3 });
 	const stored: Message = { role: "assistant", content: [{ type: "toolCall", id: "c", name: "edit", arguments: input }] };
 	assert.deepEqual((await masked(screen, [stored])).messages[0]!.content, [{ type: "toolCall", id: "c", name: "edit", arguments: written }]);
@@ -276,9 +275,9 @@ test("a shell command gets its values quoted for the shell", async () => {
 	screen.vault.allocate("SECRET", "it's; rm -rf ~");
 	const input = { command: "echo <SECRET_1> > out.txt", description: "save <SECRET_1>", timeout: 5 };
 
-	const refusal = unmaskInput(input, screen, ["command"]);
+	const result = unmaskInputInPlace(input, screen, ["command"]);
 
-	assert.equal(refusal, undefined);
+	assert.deepEqual(result, { ok: true });
 	assert.deepEqual(input, { command: `echo 'it'\\''s; rm -rf ~' > out.txt`, description: "save it's; rm -rf ~", timeout: 5 });
 	const stored: Message = { role: "assistant", content: [{ type: "toolCall", id: "c", name: "bash", arguments: input }] };
 	assert.deepEqual((await masked(screen, [stored])).messages[0]!.content, [
@@ -291,9 +290,10 @@ test("a command that cannot take a value safely is refused whole, and nothing is
 	screen.vault.allocate("SECRET", "x; rm -rf ~");
 	const input = { command: "echo `echo <SECRET_1>`", description: "<SECRET_1>" };
 
-	const refusal = unmaskInput(input, screen, ["command"]);
+	const result = unmaskInputInPlace(input, screen, ["command"]);
 
-	assert.match(refusal!, /SECRET_1.*backquotes/);
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.match(result.refusal, /SECRET_1.*backquotes/);
 	assert.deepEqual(input, { command: "echo `echo <SECRET_1>`", description: "<SECRET_1>" });
 });
 
@@ -301,9 +301,9 @@ test("arguments that are not a record of values are left alone", () => {
 	const screen = emailScreen();
 	screen.vault.allocate("SECRET", "hunter22x!");
 
-	assert.equal(unmaskInput("return '<SECRET_1>'", screen, []), undefined);
-	assert.equal(unmaskInput(null, screen, []), undefined);
-	assert.equal(unmaskInput(undefined, screen, []), undefined);
+	assert.deepEqual(unmaskInputInPlace("return '<SECRET_1>'", screen, []), { ok: true });
+	assert.deepEqual(unmaskInputInPlace(null, screen, []), { ok: true });
+	assert.deepEqual(unmaskInputInPlace(undefined, screen, []), { ok: true });
 });
 
 test("the last look goes through a payload of any shape and leaves signed and binary parts alone", () => {

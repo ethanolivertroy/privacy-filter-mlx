@@ -78,7 +78,6 @@ class ModelConfig:
     default_n_ctx: int
     encoding: str
     param_dtype: str
-    # Not stored in the released config; these are the reference's code defaults.
     swiglu_limit: float = 7.0
     swiglu_alpha: float = 1.702
     norm_eps: float = 1e-5

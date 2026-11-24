@@ -62,7 +62,6 @@ test("a value assigned to a sensitive name is found", () => {
 });
 
 test("inside a string that is itself quoted, the escaping is not part of the value", () => {
-	// How Pi writes a tool call out when it asks for a summary: the command is a quoted string, its quotes escaped.
 	assert.deepEqual(found(String.raw`bash(command="echo \"token: ${GITHUB}\" >> deploy.log")`), [GITHUB]);
 	assert.deepEqual(found(String.raw`run("export DB_PASSWORD=hunter22x9\"; echo done")`), ["hunter22x9"]);
 	assert.deepEqual(found(String.raw`{"cmd": "login --password=hunter22x9\\"}`), ["hunter22x9"]);
@@ -76,8 +75,6 @@ test("a quoted value runs to the quote that ends it, past the escaped ones insid
 });
 
 test("no text makes the patterns slow: the time grows with its length, not with the square of it", () => {
-	// Files are not written by friends. Each of these makes a pattern start over at every word if it is written carelessly;
-	// at this size that takes tens of seconds, during which nothing else in the program can run.
 	const size = 300_000;
 	const fill = (unit: string, tail = "") => unit.repeat(Math.ceil(size / unit.length)) + tail;
 	const crafted: Record<string, string> = {
@@ -110,7 +107,6 @@ test("no text makes the patterns slow: the time grows with its length, not with 
 });
 
 test("a run of many megabytes is read to its end: the pattern engine does not give up on it", () => {
-	// A counted loop ("twenty or more of these") costs the engine memory for every character it reads.
 	const size = 12 * 1024 * 1024;
 	const runs: Record<string, string> = {
 		"after a key prefix": "sk-" + "a".repeat(size),

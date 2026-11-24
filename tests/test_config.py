@@ -10,7 +10,7 @@ def test_released_config_is_accepted_and_derives_head_grouping(released_config):
     assert (cfg.left_context, cfg.right_context) == (128, 128)
     assert cfg.queries_per_kv_head == 7
     assert cfg.qkv_size == 1152
-    assert cfg.swiglu_limit == 7.0  # not in the file; the reference's default
+    assert cfg.swiglu_limit == 7.0
 
 
 def test_context_length_defaults_to_the_checkpoints_default_n_ctx(released_config):
@@ -47,7 +47,7 @@ def test_all_missing_keys_are_reported_together(released_config):
     [
         ("model_type", "gpt_oss", "model_type"),
         ("bidirectional_context", False, "bidirectional_context"),
-        ("sliding_window", 128, "sliding_window"),  # the transformers-format value
+        ("sliding_window", 128, "sliding_window"),
         ("num_attention_heads", 13, "num_attention_heads"),
         ("head_dim", 63, "head_dim"),
         ("experts_per_token", 129, "experts_per_token"),
@@ -66,9 +66,6 @@ def test_incompatible_values_are_rejected(released_config, key, value, message):
 
 
 def test_packed_activation_layout_is_rejected_rather_than_misread(released_config):
-    # The reference supports an interleaved ("packed") SwiGLU layout behind this
-    # switch. This port implements only the contiguous layout the released
-    # checkpoint uses, so it must refuse instead of computing the wrong thing.
     released_config["packed_geglu"] = True
 
     with pytest.raises(ConfigError, match="packed_geglu"):
@@ -86,8 +83,6 @@ def test_param_dtype_aliases_are_normalized(released_config, alias, expected):
 
 
 def test_rope_blend_region_must_lie_inside_the_frequency_range(released_config):
-    # The reference asserts 0 < low < high < head_dim/2 - 1. With a context this
-    # short, `low` is negative.
     released_config["initial_context_length"] = 16
 
     with pytest.raises(ConfigError, match="rope"):

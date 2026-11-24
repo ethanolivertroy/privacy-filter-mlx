@@ -16,9 +16,7 @@ after(() => {
 	for (const pid of started) {
 		try {
 			process.kill(pid, "SIGKILL");
-		} catch {
-			// already gone
-		}
+		} catch {}
 	}
 	rmSync(scratch, { recursive: true, force: true });
 });
@@ -32,10 +30,8 @@ interface Request {
 	type: string | undefined;
 	body: any;
 }
-/** An answer, or no answer at all: the connection is dropped. */
 type Reply = [status: number, body: unknown] | "hang up";
 
-/** A stand-in for `opf-mlx serve`: answers /health, and /v1/detect with whatever `detect` says. */
 async function fake(detect: (request: Request) => Reply | Promise<Reply>, health: unknown = { status: "ok", api: 1, labels: ["secret"], device: "gpu" }) {
 	const socket = socketPath();
 	const requests: Request[] = [];
@@ -53,7 +49,6 @@ async function fake(detect: (request: Request) => Reply | Promise<Reply>, health
 	return { socket, requests };
 }
 
-/** Flags every "SECRET" in a text, as the real detector would report it. */
 const flagSecrets = (request: Request): Reply => [
 	200,
 	{
@@ -158,7 +153,7 @@ test("a text too large to check is not sent, and not cut short", async () => {
 
 test("an answer that cannot be right is not used", async () => {
 	const answers: Reply[] = [
-		[200, { results: [{ spans: [] }] }], // two texts, one result
+		[200, { results: [{ spans: [] }] }],
 		[200, { results: [{ spans: [{ start: 2, end: 99, label: "secret" }] }] }],
 		[200, { results: [{ spans: [{ start: 3, end: 3, label: "secret" }] }] }],
 		[200, { results: [{ spans: [{ start: 0, end: 1 }] }] }],
@@ -200,7 +195,6 @@ test("a detector that goes away in the middle of a request fails the check as a 
 	});
 });
 
-/** A script that behaves like a detector being started: it listens on --socket after `delay` ms. */
 function starter(delay: number): string[] {
 	const script = join(scratch, `starter${counter++}.mjs`);
 	writeFileSync(

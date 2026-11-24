@@ -1,14 +1,3 @@
-"""Text in, redaction out: the whole pipeline on small checkpoints.
-
-Most tests use a rigged checkpoint (see `helpers.rigged_weights`): a real model,
-run by the real code, whose answer for each token is fixed by the test. The
-token ids are those of tiktoken's `o200k_base`:
-
-    "Alice was born on 1990-01-02."
-     100151 "Alice" | 673 " was" | 12275 " born" | 402 " on" | 220 " " | 3204 "199"
-     | 15 "0" | 12 "-" | 2290 "01" | 12 "-" | 3286 "02" | 13 "."
-"""
-
 import json
 import os
 import subprocess
@@ -40,7 +29,6 @@ PERSON_AND_DATE = {
     2290: {"I-private_date": RIGGED_LOGIT},
     3286: {"E-private_date": RIGGED_LOGIT},
 }
-# " was" opens a person span; " born" prefers background but could end it.
 OPEN_SPAN = {
     WAS: {"B-private_person": RIGGED_LOGIT},
     BORN: {"O": RIGGED_LOGIT, "E-private_person": RIGGED_LOGIT - 4},
@@ -54,9 +42,6 @@ def rigged_filter(tmp_path, token_logits, **options) -> PrivacyFilter:
 @pytest.fixture(scope="module")
 def random_checkpoint(tmp_path_factory):
     return write_checkpoint(tmp_path_factory.mktemp("random"), TINY_CONFIG, seed=3)
-
-
-# ---------------------------------------------------------------- redaction
 
 
 def test_detected_spans_are_replaced_by_typed_placeholders(tmp_path):
@@ -78,7 +63,6 @@ def test_detected_spans_are_replaced_by_typed_placeholders(tmp_path):
         ],
         "redacted_text": "<PRIVATE_PERSON> was born on <PRIVATE_DATE>.",
     }
-    # The per-label counts are sorted by label, not by order of appearance.
     assert list(result.summary["by_label"]) == ["private_date", "private_person"]
 
 
@@ -89,7 +73,6 @@ def test_spans_are_exposed_as_objects(tmp_path):
 
 
 def test_json_has_the_reference_key_order_and_keeps_non_ascii_text(tmp_path):
-    # "a<|endoftext|>b" is [64, 199999, 65]: special-token text becomes the special id.
     filt = rigged_filter(tmp_path, {199999: {"S-secret": RIGGED_LOGIT}})
 
     assert filt.redact("a<|endoftext|>b").to_json(indent=None) == (
@@ -103,7 +86,6 @@ def test_json_has_the_reference_key_order_and_keeps_non_ascii_text(tmp_path):
 def test_whitespace_is_trimmed_from_spans_by_default(tmp_path):
     result = rigged_filter(tmp_path, {WAS: {"S-private_person": RIGGED_LOGIT}}).redact(SENTENCE)
 
-    # The token is " was"; the leading space is not part of the span.
     assert result.detected_spans == (DetectedSpan("private_person", 6, 9, "was", "<PRIVATE_PERSON>"),)
     assert result.redacted_text == "Alice <PRIVATE_PERSON> born on 1990-01-02."
 
@@ -143,24 +125,15 @@ def test_empty_text_has_nothing_to_redact(tmp_path):
 
 
 def test_a_character_split_across_tokens_is_redacted_once(tmp_path):
-    # "x🧿y" is [87, 4103, 100, 123, 88]: the emoji's four bytes are spread over
-    # three tokens, and each of them covers the whole character.
     filt = rigged_filter(tmp_path, {4103: {"S-secret": RIGGED_LOGIT}, 100: {"S-private_person": RIGGED_LOGIT}})
     assert filt.tokenizer.encode("x🧿y") == [87, 4103, 100, 123, 88]
 
     result = filt.redact("x🧿y")
 
-    # Two spans claim character 1. The reference keeps one: earliest, then
-    # longest, then first by label name.
     assert result.detected_spans == (DetectedSpan("private_person", 1, 2, "🧿", "<PRIVATE_PERSON>"),)
     assert result.redacted_text == "x<PRIVATE_PERSON>y"
 
 
-# "x🧿a𝔘" is [87 "x", 4103, 100, 123, 64 "a", 43120, 242, 246]: 🧿 is tokens 4103, 100, 123
-# and 𝔘 is tokens 43120, 242, 246. Three spans, each sharing a character with the next:
-#   secret          tokens 87..4103      characters 0..2  "x🧿"
-#   private_person  tokens 100..43120    characters 1..4  "🧿a𝔘"
-#   private_person  token  242           characters 3..4  "𝔘"
 CHAINED_SPANS = {
     87: {"B-secret": RIGGED_LOGIT},
     4103: {"E-secret": RIGGED_LOGIT},
@@ -178,7 +151,6 @@ def test_overlapping_spans_are_resolved_left_to_right(tmp_path):
 
     result = filt.redact("x🧿a𝔘")
 
-    # The first span wins, the second overlaps it and goes, the third is clear of the first.
     assert result.redacted_text == "<SECRET>a<PRIVATE_PERSON>"
 
 
@@ -187,14 +159,11 @@ def test_discarding_overlaps_per_label_happens_before_spans_are_chosen(tmp_path)
 
     result = filt.redact("x🧿a𝔘")
 
-    # The third span overlaps the second, which has the same label, so it is
-    # discarded first; then the second loses to the first as before.
     assert result.detected_spans == (DetectedSpan("secret", 0, 2, "x🧿", "<SECRET>"),)
     assert result.redacted_text == "<SECRET>a𝔘"
 
 
 def test_text_that_does_not_round_trip_is_reported(tmp_path):
-    # A lone surrogate cannot be encoded; the tokenizer sees U+FFFD (token 3251).
     filt = rigged_filter(tmp_path, {3251: {"S-secret": RIGGED_LOGIT}})
 
     with pytest.warns(PrivacyFilterWarning, match="did not exactly match tokenizer round-trip decode"):
@@ -209,13 +178,7 @@ def test_text_that_does_not_round_trip_is_reported(tmp_path):
     )
 
 
-# ----------------------------------------------------------------- decoding
-
-
 def test_viterbi_completes_a_span_that_argmax_would_cut_short(tmp_path):
-    # Per token, " born" is most likely background. As a sequence, a person
-    # span that was opened must be closed, and closing it on " born" costs 4
-    # nats where every alternative costs 20.
     result = rigged_filter(tmp_path, OPEN_SPAN).redact(SENTENCE)
 
     assert result.detected_spans == (DetectedSpan("private_person", 6, 14, "was born", "<PRIVATE_PERSON>"),)
@@ -231,7 +194,6 @@ def test_argmax_decoding_takes_each_token_on_its_own(tmp_path):
 
 def test_calibration_file_next_to_the_checkpoint_is_applied(tmp_path):
     checkpoint = rigged_checkpoint(tmp_path / "checkpoint", OPEN_SPAN)
-    # Ending a span now costs 30 more, so not opening one (20) is cheaper.
     write_calibration(checkpoint / "viterbi_calibration.json", transition_bias_inside_to_end=-30.0)
 
     result = PrivacyFilter(checkpoint).redact(SENTENCE)
@@ -250,16 +212,12 @@ def test_an_explicit_calibration_path_wins(tmp_path):
     assert result.redacted_text == "Alice <PRIVATE_PERSON> on 1990-01-02."
 
 
-# ------------------------------------------------------------------ windows
-
-
 def test_long_input_is_split_into_windows_and_nothing_is_dropped(tmp_path):
     filt = rigged_filter(tmp_path, PERSON_AND_DATE, n_ctx=5)
 
     with pytest.warns(PrivacyFilterWarning, match="3 consecutive windows"):
         result = filt.redact(SENTENCE)
 
-    # 12 tokens in windows of 5, 5 and 2. The date straddles the last cut.
     assert result.redacted_text == "<PRIVATE_PERSON> was born on <PRIVATE_DATE>."
     assert result.warning == (
         "Input has 12 tokens but the context window holds 5 (n_ctx), so it was processed in 3 consecutive windows. "
@@ -285,7 +243,6 @@ def test_each_consecutive_window_sees_only_its_own_tokens(random_checkpoint):
     np.testing.assert_array_equal(scores[0:5], whole.log_probs(SENTENCE_IDS[0:5]))
     np.testing.assert_array_equal(scores[5:10], whole.log_probs(SENTENCE_IDS[5:10]))
     np.testing.assert_array_equal(scores[10:12], whole.log_probs(SENTENCE_IDS[10:12]))
-    # In one pass, tokens next to a cut see their neighbours across it.
     assert np.abs(scores - whole.log_probs(SENTENCE_IDS)).max() > 1e-3
 
 
@@ -295,22 +252,16 @@ def test_log_probabilities_are_normalized(random_checkpoint):
     np.testing.assert_allclose(np.exp(scores.astype(np.float64)).sum(axis=1), 1.0, atol=1e-5)
 
 
-# The tiny model sees 6 tokens to the left and 4 to the right, so its default halo is 6.
 FORTY_TOKENS = [(7 * i) % 50 + 1 for i in range(40)]
 
 
 def test_halo_windows_reproduce_a_single_pass(random_checkpoint):
-    # float32 weights and 40 positions: here the rounding of the rotary table,
-    # which differs between a window and the whole text, is far below 1e-4.
-    # (In bfloat16, or thousands of positions apart, it is not: see
-    # docs/architecture.md, section 5.)
     whole = PrivacyFilter(random_checkpoint, n_ctx=64, dtype="float32")
     halo = PrivacyFilter(random_checkpoint, n_ctx=20, window_policy="halo", dtype="float32")
 
-    scores = halo.log_probs(FORTY_TOKENS)  # 4 windows
+    scores = halo.log_probs(FORTY_TOKENS)
 
     np.testing.assert_allclose(scores, whole.log_probs(FORTY_TOKENS), atol=1e-4)
-    # Consecutive windows of the same size do not.
     with pytest.warns(PrivacyFilterWarning, match="2 consecutive windows"):
         cut = PrivacyFilter(random_checkpoint, n_ctx=20, dtype="float32").log_probs(FORTY_TOKENS)
     assert np.abs(cut - whole.log_probs(FORTY_TOKENS)).max() > 1e-3
@@ -319,7 +270,7 @@ def test_halo_windows_reproduce_a_single_pass(random_checkpoint):
 def test_halo_windows_that_cover_the_models_reach_come_without_a_warning(random_checkpoint):
     filt = PrivacyFilter(random_checkpoint, n_ctx=20, window_policy="halo")
     text = " ".join([SENTENCE] * 4)
-    assert len(filt.tokenizer.encode(text)) > 40  # several windows
+    assert len(filt.tokenizer.encode(text)) > 40
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", PrivacyFilterWarning)
@@ -329,7 +280,6 @@ def test_halo_windows_that_cover_the_models_reach_come_without_a_warning(random_
 
 
 def test_a_halo_shorter_than_the_models_reach_is_reported(random_checkpoint):
-    # 5 tokens cover the model's reach to the right (4) but not to the left (6).
     filt = PrivacyFilter(random_checkpoint, n_ctx=20, window_policy="halo", halo=5)
 
     with pytest.warns(PrivacyFilterWarning, match="3 windows with a halo of 5 tokens, less than the model's reach"):
@@ -343,15 +293,11 @@ def test_a_window_with_no_room_between_two_halos_is_refused_when_the_filter_is_b
 
 
 def test_default_window_is_the_checkpoints_on_gpu_and_4096_on_cpu(tmp_path):
-    # The reference uses the checkpoint's default_n_ctx on an accelerator and 4096 on the CPU.
     checkpoint = rigged_checkpoint(tmp_path / "checkpoint", {})
 
     assert PrivacyFilter(checkpoint).n_ctx == 64
     assert PrivacyFilter(checkpoint, device="cpu").n_ctx == 4096
     assert PrivacyFilter(checkpoint, device="cpu", n_ctx=7).n_ctx == 7
-
-
-# ------------------------------------------------------------------ loading
 
 
 @pytest.mark.parametrize(
@@ -384,7 +330,6 @@ def test_a_checkpoint_that_does_not_match_the_architecture_is_refused(tmp_path):
 
 @pytest.mark.parametrize("vocab_size", [1000, 200018])
 def test_a_vocabulary_smaller_than_the_tokenizer_is_refused(tmp_path, vocab_size):
-    # o200k_base ids run from 0 to 200018, so 200019 embedding rows are needed.
     checkpoint = write_checkpoint(tmp_path / "checkpoint", {**TINY_CONFIG, "vocab_size": vocab_size})
 
     with pytest.raises(ConfigError, match=f"vocab_size {vocab_size} .* o200k_base .* 200018"):
@@ -421,7 +366,7 @@ def test_float32_can_be_requested(tmp_path):
 
 def test_a_model_larger_than_the_device_limit_is_refused(tmp_path, monkeypatch):
     checkpoint = rigged_checkpoint(tmp_path / "checkpoint", {})
-    monkeypatch.setattr(env, "gpu_memory_limit", lambda: 1024)  # a machine with 1 KiB for the GPU
+    monkeypatch.setattr(env, "gpu_memory_limit", lambda: 1024)
 
     with pytest.raises(InsufficientMemoryError, match="MLX can use at most 1.0 KiB"):
         PrivacyFilter(checkpoint)
@@ -435,9 +380,6 @@ def test_low_free_memory_warns_but_loads(tmp_path, monkeypatch):
         filt = PrivacyFilter(checkpoint)
 
     assert filt.redact(SENTENCE).redacted_text == "<PRIVATE_PERSON> was born on <PRIVATE_DATE>."
-
-
-# ------------------------------------------------------------------- device
 
 
 def test_the_cpu_gives_the_same_redaction(tmp_path):
@@ -492,5 +434,4 @@ def test_with_reduced_precision_forced_on_the_gpu_is_refused_and_the_cpu_is_exac
     if report["gap"] < 1e-4:
         pytest.skip("this GPU has no reduced-precision float32 matmul")
     assert report["gpu"].startswith("refused:") and "MLX_ENABLE_TF32=0" in report["gpu"]
-    # The CPU ignores the switch, so device="cpu" must give what an exact run gives.
     np.testing.assert_allclose(np.array(report["cpu"], dtype=np.float32), expected, atol=1e-4)

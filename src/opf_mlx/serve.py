@@ -109,7 +109,7 @@ class SocketClaim:
             self._lock = None
             raise ServeError(f"another opf-mlx serve already owns {self.path}") from None
         if self._kind() == "socket":
-            os.unlink(self.path)  # left behind by a server that is gone
+            os.unlink(self.path)
 
     def _kind(self) -> str | None:
         try:
@@ -190,7 +190,7 @@ class DetectionServer:
             self.address = f"http://[{address}]:{bound}" if address.version == 6 else f"http://{address}:{bound}"
         else:
             self._claim = claim if claim is not None else SocketClaim(socket_path)
-            previous_umask = os.umask(0o177)  # the socket is created readable and writable by the user only
+            previous_umask = os.umask(0o177)
             try:
                 self._server = _UnixServer(str(self._claim.path), handler)
             except OSError:
@@ -205,7 +205,7 @@ class DetectionServer:
         """Answer requests until `stop` is called or the service has been idle for `idle_exit` seconds."""
         self._last_activity = time.monotonic()
         while not self._stopping:
-            self._server.handle_request()  # returns after one request, or after `poll_interval` without one
+            self._server.handle_request()
             if self._idle_exit is not None and time.monotonic() - self._last_activity >= self._idle_exit:
                 return
 
@@ -224,8 +224,6 @@ class DetectionServer:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-    # ------------------------------------------------- what the handler calls
 
     def touch(self) -> None:
         self._last_activity = time.monotonic()
@@ -276,7 +274,7 @@ class DetectionServer:
                 results.append(self._detect_one(text, offsets))
             except _InvalidSpan:
                 reason = "invalid span"
-            except Exception as error:  # the detector is someone else's code; say only what kind of failure
+            except Exception as error:
                 reason = type(error).__name__
             else:
                 continue
@@ -312,7 +310,6 @@ class _InvalidSpan(Exception):
 
 
 def _to_utf16(text: str, spans: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
-    """Convert code point offsets into UTF-16 code unit offsets."""
     if text.isascii():
         return spans
     units: dict[int, int] = {}
@@ -344,17 +341,14 @@ def _loopback(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
-    """One request per connection. Every reply is JSON, and none repeats what was sent."""
-
     service: DetectionServer
     server_version = "opf-mlx"
     sys_version = ""
 
     def log_message(self, format: str, *args: object) -> None:
-        pass  # a request line or an error from the base class could carry text; print neither
+        pass
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
-        # The base class would answer in HTML and quote the request line.
         self._reply(code, {"error": HTTPStatus(code).phrase.lower()})
 
     def _reply(self, status: int, payload: Mapping[str, object]) -> None:
@@ -376,14 +370,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._reply(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        self.service.touch()
-        if self.path == "/v1/detect":
-            self._reply(*self.service.detect_request(self.headers, self.rfile))
-        elif self.path == "/health":
-            self._not_allowed()
-        else:
-            self._reply(404, {"error": "not found"})
-        self.service.touch()  # a long detection is not idle time
+        try:
+            if self.path == "/v1/detect":
+                self._reply(*self.service.detect_request(self.headers, self.rfile))
+            elif self.path == "/health":
+                self._not_allowed()
+            else:
+                self._reply(404, {"error": "not found"})
+        finally:
+            self.service.touch()
 
     def _not_allowed(self) -> None:
         self._reply(405, {"error": "method not allowed"})
@@ -397,7 +392,7 @@ class _Quiet:
     def handle_error(self, request: object, client_address: object) -> None:
         error = sys.exception()
         if isinstance(error, (ConnectionError, TimeoutError)):
-            return  # the client went away; nothing to report
+            return
         print(f"opf-mlx serve: internal error ({type(error).__name__})", file=sys.stderr)
 
 

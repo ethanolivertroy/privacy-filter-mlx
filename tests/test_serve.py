@@ -1,9 +1,3 @@
-"""The local detection service (`opf_mlx.serve`), driven with fake detectors.
-
-The service only moves text in and spans out, so nothing here loads a model.
-The command that wires it to a real one is tested in test_cli.py.
-"""
-
 import ast
 import http.client
 import json
@@ -23,12 +17,11 @@ import pytest
 from opf_mlx import serve
 from opf_mlx.serve import Detection, DetectionServer, ServeError, SocketClaim
 
-GRIN = "\U0001f600"  # one code point, two UTF-16 code units
+GRIN = "\U0001f600"
 JSON = {"Content-Type": "application/json"}
 
 
 def find_words(*words: str, label: str = "secret"):
-    """A detector that flags every occurrence of the given words."""
     pattern = re.compile("|".join(re.escape(word) for word in words))
 
     def detect(text: str) -> Detection:
@@ -92,9 +85,6 @@ def running(detector, **options):
         server.close()
 
 
-# ------------------------------------------------------------------ detecting
-
-
 def test_each_text_gets_its_spans_in_order():
     with running(find_words("hunter2", "Alice")) as server:
         status, body = detect(server.address, ["pw hunter2", "nothing here", "Alice and Alice"])
@@ -130,7 +120,6 @@ def test_offsets_count_code_points_unless_utf16_is_asked_for():
 
 
 def test_a_lone_surrogate_reaches_the_detector_as_a_replacement_character():
-    # JavaScript strings can hold half a surrogate pair; JSON carries it as an escape.
     seen: list[str] = []
 
     def detector(text: str) -> Detection:
@@ -154,9 +143,6 @@ def test_health_reports_the_api_version_and_what_the_caller_said_about_the_model
         status, body = call(server.address, "GET", "/health")
 
     assert (status, body) == (200, {"status": "ok", "api": 1, "labels": ["secret"], "dtype": "bfloat16"})
-
-
-# ------------------------------------------------------------- bad requests
 
 
 @pytest.mark.parametrize(
@@ -214,9 +200,6 @@ def test_unknown_paths_and_methods_are_refused():
         assert call(server.address, "DELETE", "/v1/detect") == (405, {"error": "method not allowed"})
 
 
-# -------------------------------------------------------- detector failures
-
-
 def test_a_failing_detector_is_a_500_that_does_not_repeat_the_text_and_the_service_carries_on():
     def detector(text: str) -> Detection:
         if "boom" in text:
@@ -252,9 +235,6 @@ def test_nothing_about_a_request_is_printed(capfd):
     assert capfd.readouterr() == ("", "")
 
 
-# -------------------------------------------------------------- unix socket
-
-
 def test_a_unix_socket_is_private_to_the_user_and_removed_on_close(short_dir):
     path = short_dir / "s.sock"
     with running(find_words("hunter2"), socket_path=path, port=None) as server:
@@ -270,7 +250,7 @@ def test_a_socket_left_by_a_dead_server_is_replaced(short_dir):
     path = short_dir / "s.sock"
     leftover = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     leftover.bind(str(path))
-    leftover.close()  # the file stays, and nothing listens on it
+    leftover.close()
 
     with running(find_words("x"), socket_path=path, port=None) as server:
         assert call(server.address, "GET", "/health")[0] == 200
@@ -294,7 +274,7 @@ def test_a_claim_is_taken_before_the_slow_part_and_handed_to_the_server(short_di
             assert call(server.address, "GET", "/health")[0] == 200
 
     assert not path.exists()
-    SocketClaim(path).release()  # free again
+    SocketClaim(path).release()
 
 
 def test_a_path_that_is_not_a_socket_is_left_alone(short_dir):
@@ -320,9 +300,6 @@ def test_the_directory_of_the_socket_is_created(short_dir):
         assert call(server.address, "GET", "/health")[0] == 200
 
 
-# ----------------------------------------------------------------- tcp, idle
-
-
 def test_tcp_listens_on_loopback_only():
     with pytest.raises(ServeError, match="only a loopback address"):
         DetectionServer(find_words("x"), host="0.0.0.0", port=0)
@@ -346,7 +323,7 @@ def test_serving_ends_after_the_idle_time_and_a_request_restarts_the_clock():
     started = time.monotonic()
     thread.start()
     time.sleep(0.2)
-    assert call(server.address, "GET", "/health")[0] == 200  # still up; the clock restarts here
+    assert call(server.address, "GET", "/health")[0] == 200
     thread.join(5)
     elapsed = time.monotonic() - started
     server.close()
@@ -359,7 +336,7 @@ def test_a_client_that_stops_talking_does_not_hold_the_service():
     with running(find_words("x"), request_timeout=0.2) as server:
         host, port = server.address[len("http://") :].split(":")
         stalled = socket.create_connection((host, int(port)))
-        stalled.sendall(b"POST /v1/detect HTTP/1.0\r\nContent-Length: 50\r\n")  # and then nothing
+        stalled.sendall(b"POST /v1/detect HTTP/1.0\r\nContent-Length: 50\r\n")
         started = time.monotonic()
         status, _ = call(server.address, "GET", "/health")
         stalled.close()
@@ -369,7 +346,6 @@ def test_a_client_that_stops_talking_does_not_hold_the_service():
 
 
 def test_serving_is_separate_from_the_model():
-    # Only the standard library: no MLX, no tokenizer, and nothing else from this package.
     tree = ast.parse(Path(serve.__file__).read_text())
     imported = {
         (node.module or "." * node.level) if isinstance(node, ast.ImportFrom) else alias.name

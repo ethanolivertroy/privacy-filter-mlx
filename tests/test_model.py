@@ -1,12 +1,3 @@
-"""The MLX model against an independent NumPy implementation and its own invariants.
-
-`reference_forward` below is written straight from docs/architecture.md with
-plain loops over tokens, heads and experts in float64. It shares no code and
-no structure with `opf_mlx.model` (which uses blocked matmuls and groups tokens
-by expert), so agreement between the two is evidence about the math rather than
-about one implementation agreeing with itself.
-"""
-
 import math
 
 import mlx.core as mx
@@ -18,10 +9,6 @@ from helpers import random_weights
 from opf_mlx.config import ModelConfig
 from opf_mlx.model import MixtureOfExperts, Transformer, rope_tables, swiglu
 from opf_mlx.weights import expected_tensors
-
-# --------------------------------------------------------------------------
-# Independent reference
-# --------------------------------------------------------------------------
 
 
 def ref_rope(cfg: ModelConfig, num_positions: int) -> tuple[np.ndarray, np.ndarray]:
@@ -42,7 +29,6 @@ def ref_rope(cfg: ModelConfig, num_positions: int) -> tuple[np.ndarray, np.ndarr
 
 
 def ref_rotate(x: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
-    """x: [T, heads, head_dim]; rotate interleaved pairs (2i, 2i+1) by position."""
     out = np.empty_like(x)
     for t in range(x.shape[0]):
         for i in range(x.shape[2] // 2):
@@ -82,7 +68,7 @@ def reference_forward(cfg: ModelConfig, w: dict[str, np.ndarray], tokens: list[i
             for head in range(H):
                 group = head // (H // G)
                 scores = [q[t, head] @ k[j, group] for j in range(lo, hi)]
-                scores.append(w[f"{p}.sinks"][head] * math.log(2.0))  # the sink: a logit with no value
+                scores.append(w[f"{p}.sinks"][head] * math.log(2.0))
                 prob = ref_softmax(np.array(scores))
                 for offset, j in enumerate(range(lo, hi)):
                     attended[t, head] += prob[offset] * v[j, group]
@@ -106,11 +92,6 @@ def reference_forward(cfg: ModelConfig, w: dict[str, np.ndarray], tokens: list[i
     return ref_rmsnorm(x, w["norm.scale"]) @ w["unembedding.weight"].T
 
 
-# --------------------------------------------------------------------------
-# Fixtures
-# --------------------------------------------------------------------------
-
-
 @pytest.fixture(scope="module")
 def cfg() -> ModelConfig:
     from conftest import TINY_CONFIG
@@ -120,7 +101,6 @@ def cfg() -> ModelConfig:
 
 @pytest.fixture(scope="module")
 def stored(cfg) -> dict[str, mx.array]:
-    """Random weights in the checkpoint's storage dtypes (bfloat16 stream)."""
     return random_weights(cfg, seed=7)
 
 
@@ -146,13 +126,7 @@ TOKENS = [3, 141, 59, 26, 53, 58, 97, 93, 23, 84, 62, 64, 33, 83, 27, 95, 2, 88,
 DEVICES = {"gpu": mx.gpu, "cpu": mx.cpu}
 
 
-# --------------------------------------------------------------------------
-# Tests
-# --------------------------------------------------------------------------
-
-
 def test_logits_match_the_independent_numpy_implementation(cfg, stored):
-    # 23 tokens against a band of 3 left / 2 right: most pairs are masked.
     expected = reference_forward(cfg, as_numpy(stored), TOKENS)
 
     logits = run(build(cfg, as_float32(stored)), TOKENS)
@@ -166,11 +140,6 @@ def test_checkpoint_precision_stays_close_to_exact_arithmetic(cfg, stored):
 
     logits = run(build(cfg, stored), TOKENS)
 
-    # bfloat16 keeps 8 significant bits and rounds after every step. Single
-    # logits can be off by tenths (measured: up to 1.4 on a scale of 6 across
-    # seeds), but the error is a few percent of the signal on average. The
-    # sharp check of this path is parity with the PyTorch reference, one
-    # sublayer at a time: tests/test_golden.py and tests/test_parity.py.
     assert np.isfinite(logits).all()
     assert np.sqrt(np.mean((logits - expected) ** 2)) < 0.1 * np.sqrt(np.mean(expected**2))
 
@@ -191,8 +160,6 @@ def test_a_token_only_affects_logits_within_the_receptive_field(cfg, stored):
 
     delta = np.abs(run(model, changed) - run(model, tokens)).max(axis=1)
 
-    # Token t reads tokens t-3..t+2, so token 20 is read by tokens 18..23, and
-    # after two layers by tokens 16..26.
     assert delta[20] > 1e-3
     assert delta[16] > 1e-6 and delta[26] > 1e-6
     assert delta[:16].max() < 1e-5
@@ -223,12 +190,6 @@ def test_expert_steps_of_any_size_give_the_same_bits(cfg, stored, device, precis
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_a_tokens_experts_give_it_the_same_bits_whatever_else_is_routed_with_it(released_config, device):
-    # The reference applies experts to one token at a time. Grouping tokens by
-    # expert must not let the other tokens into a token's arithmetic, or its
-    # result would depend on the rest of the input and on `expert_chunk`. A
-    # matrix product of one row and the same row inside a product of many can
-    # differ in the last bit, so this is checked at the released layer sizes,
-    # where the kernels are the ones that run in practice.
     config = ModelConfig.from_dict({**released_config, "num_experts": 8})
     rng = np.random.default_rng(0)
     parameters = tree_map(
@@ -243,18 +204,14 @@ def test_a_tokens_experts_give_it_the_same_bits_whatever_else_is_routed_with_it(
         return layer
 
     with mx.stream(DEVICES[device]):
-        together = np.array(expert_layer(48)(x))  # about 24 tokens share each expert
-        one_by_one = np.array(expert_layer(1)(x))  # every token is alone with each of its experts
+        together = np.array(expert_layer(48)(x))
+        one_by_one = np.array(expert_layer(1)(x))
 
-    assert not np.array_equal(together, np.array(x))  # the layer did something
+    assert not np.array_equal(together, np.array(x))
     assert np.array_equal(one_by_one, together)
 
 
 def test_the_experts_work_without_a_copy_of_their_weights_for_every_token(released_config):
-    # One expert's first matrix is 3.3 MB at the released sizes. Picking the
-    # matrices out per token (`weight[experts]`) gives the same numbers and
-    # needs that much for each of a token's four experts: 3 GiB for the 256
-    # tokens here, 200 GiB for one step of the default size.
     config = ModelConfig.from_dict({**released_config, "num_experts": 8})
     rng = np.random.default_rng(0)
     layer = MixtureOfExperts(config, 256)
@@ -291,21 +248,16 @@ def test_a_dominant_sink_silences_attention(cfg, stored):
 
     out = model.block[0].attn(x, cos, sin)
 
-    # With all probability on the sink, nothing is read from any token and the
-    # block adds only its output bias.
     np.testing.assert_allclose(np.array(out), np.array(x + weights["block.0.attn.out.bias"]), atol=1e-5)
 
 
 def test_with_uniform_scores_each_token_keeps_its_band_share_against_the_sink(cfg, stored):
-    # Zero query/key projections make every score 0, so a token that can see n
-    # tokens gives each of them weight 1 / (n + 2^sink): the sink is stored in
-    # log2 units. Every value is 1, so the block adds n / (n + 2^sink).
     weights = as_float32(stored)
     bias = np.zeros(80, dtype=np.float32)
-    bias[64:] = 1.0  # the value part of the fused q/k/v projection (48 + 16 + 16)
+    bias[64:] = 1.0
     weights["block.0.attn.qkv.weight"] = mx.zeros((80, 16))
     weights["block.0.attn.qkv.bias"] = mx.array(bias)
-    weights["block.0.attn.sinks"] = mx.ones((6,))  # 2^1 = 2
+    weights["block.0.attn.sinks"] = mx.ones((6,))
     weights["block.0.attn.out.weight"] = mx.array(np.eye(16, 48, dtype=np.float32))
     weights["block.0.attn.out.bias"] = mx.zeros((16,))
     model = build(cfg, weights)
@@ -313,46 +265,43 @@ def test_with_uniform_scores_each_token_keeps_its_band_share_against_the_sink(cf
 
     added = np.array(model.block[0].attn(x, *rope_tables(cfg, 9)) - x)[0]
 
-    # The band is 3 left / 2 right, so tokens 0..8 of 9 see 3, 4, 5, 6, 6, 6, 6, 5, 4 tokens.
     share = np.array([3 / 5, 4 / 6, 5 / 7, 6 / 8, 6 / 8, 6 / 8, 6 / 8, 5 / 7, 4 / 6])
     np.testing.assert_allclose(added, np.repeat(share[:, None], 16, axis=1), atol=1e-5)
 
 
 def test_the_query_and_key_scale_is_applied_in_float32_and_rounded_once(stored):
-    # PyTorch multiplies a bfloat16 tensor by a Python number in float32 and
-    # rounds the product once. Rounding the number first gives another scale:
-    # for a head size of 8 it is 8^-0.25 = 0.59460354 in float32 but 0.59375 in
-    # bfloat16. One token whose query and key are both 1248 tells the rules apart:
-    #
-    #   query, key  1248 * 0.59460354 = 742.07 -> 744    (bfloat16 steps of 4)
-    #               1248 * 0.59375    = 741.00 -> 740
-    #   score       744 * 744 = 553536 -> 552960         (steps of 4096)
-    #               744 * 740 = 550560 -> 548864         (one of the two scaled the other way)
-    #               742.07 * 742.07 = 550661             (neither rounded after scaling)
-    #   sink        794624 * ln 2 = 550791
-    #
-    # Done right, the token beats the sink by 2169 and keeps all of the weight.
-    # Done any other way it loses by 130 or more and keeps none.
     from conftest import TINY_CONFIG
 
-    config = ModelConfig.from_dict({**TINY_CONFIG, "rope_scaling_factor": 1.0})  # position 0 is left as it is
-    bias = np.zeros(80, dtype=np.float32)
-    bias[0:48:8] = 1248.0  # the first coordinate of each of the 6 queries,
-    bias[48:64:8] = 1248.0  # of the 2 keys
-    bias[64:80:8] = 1.0  # and of the 2 values
+    config = ModelConfig.from_dict({**TINY_CONFIG, "rope_scaling_factor": 1.0})
+    head_dim = config.head_dim
+    q_end = config.num_attention_heads * head_dim
+    k_end = q_end + config.num_key_value_heads * head_dim
+    v_end = config.qkv_size
+
+    qk_scale = head_dim**-0.25
+    probe_value = 1248.0
+    score_if_f32_scaled = float((mx.array(probe_value, mx.float32) * qk_scale).astype(mx.bfloat16).item()) ** 2
+    score_if_bf16_scaled = float((mx.array(probe_value, mx.bfloat16) * mx.array(qk_scale, mx.bfloat16)).item()) ** 2
+    assert score_if_f32_scaled > score_if_bf16_scaled
+    threshold_sink_log2 = ((score_if_f32_scaled + score_if_bf16_scaled) / 2) / math.log(2.0)
+
+    bias = np.zeros(v_end, dtype=np.float32)
+    bias[0:q_end:head_dim] = probe_value
+    bias[q_end:k_end:head_dim] = probe_value
+    bias[k_end:v_end:head_dim] = 1.0
     weights = dict(stored)
-    weights["block.0.attn.qkv.weight"] = mx.zeros((80, 16), dtype=mx.bfloat16)
+    weights["block.0.attn.qkv.weight"] = mx.zeros((v_end, config.hidden_size), dtype=mx.bfloat16)
     weights["block.0.attn.qkv.bias"] = mx.array(bias).astype(mx.bfloat16)
-    weights["block.0.attn.sinks"] = mx.full((6,), 794624.0).astype(stored["block.0.attn.sinks"].dtype)
-    weights["block.0.attn.out.weight"] = mx.array(np.eye(16, 48, dtype=np.float32)).astype(mx.bfloat16)
-    weights["block.0.attn.out.bias"] = mx.zeros((16,), dtype=mx.bfloat16)
+    weights["block.0.attn.sinks"] = mx.full((config.num_attention_heads,), threshold_sink_log2).astype(
+        stored["block.0.attn.sinks"].dtype
+    )
+    weights["block.0.attn.out.weight"] = mx.array(np.eye(config.hidden_size, q_end, dtype=np.float32)).astype(mx.bfloat16)
+    weights["block.0.attn.out.bias"] = mx.zeros((config.hidden_size,), dtype=mx.bfloat16)
     model = build(config, weights)
-    x = mx.zeros((1, 1, 16), dtype=mx.bfloat16)
+    x = mx.zeros((1, 1, config.hidden_size), dtype=mx.bfloat16)
 
     added = np.array(model.block[0].attn(x, *rope_tables(config, 1)).astype(mx.float32))[0, 0]
 
-    # Residual dimension j receives coordinate j of the attention output, so
-    # dimensions 0 and 8 hold the first coordinates of heads 0 and 1.
     assert added.tolist() == [1.0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 0, 0, 0]
 
 
@@ -374,7 +323,6 @@ def test_empty_sequence_is_rejected(cfg, stored):
 
 @pytest.mark.parametrize("bad", [-1, 200064])
 def test_token_ids_outside_the_vocabulary_are_rejected(cfg, stored, bad):
-    # Out-of-range gathers are undefined in MLX, so they must never reach the embedding.
     with pytest.raises(ValueError, match="vocabulary"):
         build(cfg, stored)(mx.array([[5, bad, 7]]))
 
@@ -384,8 +332,6 @@ def test_rope_tables_stay_accurate_far_from_the_origin(released_config):
 
     cos, sin = rope_tables(config, 131072)
 
-    # Pair 0 turns exactly one radian per token, so the expected values need no
-    # float32 angle rounding. Trigonometry with poor range reduction fails here.
     for position in (100_000, 131_071):
         assert cos[position, 0].item() == pytest.approx(1.3465736 * math.cos(position), abs=1e-6)
         assert sin[position, 0].item() == pytest.approx(1.3465736 * math.sin(position), abs=1e-6)
@@ -409,10 +355,8 @@ def test_rope_tables_follow_the_yarn_formula(released_config):
     assert cos.dtype == mx.float32 and cos.shape == (300, 32)
     np.testing.assert_allclose(np.array(cos), want_cos, atol=1e-4)
     np.testing.assert_allclose(np.array(sin), want_sin, atol=1e-4)
-    # Magnitude 0.1 * ln(32) + 1 at position 0; pair 0 turns one radian per token.
     assert np.array(cos)[0, 0] == pytest.approx(1.3465736, abs=1e-6)
     assert np.array(sin)[1, 0] == pytest.approx(1.3465736 * math.sin(1.0), abs=1e-6)
-    # Pair 31 is slowed by the scaling factor: 1 / (32 * 150000^(62/64)).
     assert np.array(sin)[299, 31] == pytest.approx(1.3465736 * math.sin(299 / (32 * 150000 ** (62 / 64))), abs=1e-7)
 
 
@@ -420,13 +364,10 @@ def test_swiglu_uses_contiguous_halves_clamps_and_adds_one():
     def sigmoid(z: float) -> float:
         return 1 / (1 + math.exp(-z))
 
-    # Gate half is the first three entries, linear half the last three.
     u = mx.array([[8.0, 1.0, -9.0, 0.5, -9.0, 2.0]])
 
     out = np.array(swiglu(u, limit=7.0, alpha=1.702))[0]
 
-    # Gate 8.0 clamps to 7.0. Linear -9.0 clamps to -7.0. A gate of -9.0 is
-    # not clamped: only the upper side of the gate is limited.
     assert out[0] == pytest.approx(7.0 * sigmoid(1.702 * 7.0) * (0.5 + 1), rel=1e-6)
     assert out[1] == pytest.approx(1.0 * sigmoid(1.702) * (-7.0 + 1), rel=1e-6)
     assert out[2] == pytest.approx(-9.0 * sigmoid(1.702 * -9.0) * (2.0 + 1), rel=1e-4)

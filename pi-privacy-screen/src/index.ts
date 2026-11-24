@@ -1,35 +1,3 @@
-/**
- * Privacy screen for the Pi coding agent.
- *
- * Private values (names, addresses, secrets...) are replaced by numbered
- * placeholders before a request leaves this machine, and put back when the
- * reply and its tool calls come in. What is stored and shown here is real;
- * what a provider receives is masked.
- *
- *   session_start          the conversation a session starts with is checked
- *                          right away, while the user is still typing
- *   input                  the detector must be up, or the message is not sent
- *   before_agent_start     the prompt gets a short note about placeholders
- *   context_with_system    every text of the request is masked      (screen.ts)
- *   before_provider_request  a last look at the finished payload
- *   message_end            a reply gets its values back: its text, and the
- *                          arguments of its tool calls               (shell.ts)
- *   tool_call              the same for arguments that are still masked
- *                          (both only for a reply to a request that went out
- *                          masked: a model that was sent the real text can
- *                          only be quoting a placeholder, not using one)
- *   session_before_compact / session_before_tree
- *                          summaries are made from masked text
- *
- * Pi carries on with the unchanged request when a handler throws. So nothing
- * here may throw on the way out: whatever goes wrong, text that has not been
- * checked is withheld and the request is stopped.
- *
- * Modes: "mask" (the default), "report" (look and count, change nothing) and
- * "off". `/privacy` shows the state and switches. Requests to a model on this
- * machine are not screened unless the settings ask for it.
- */
-
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,13 +7,12 @@ import { configPath, isLocalModel, parseConfig } from "./config.ts";
 import type { Config, Mode } from "./config.ts";
 import { Detector } from "./detector.ts";
 import { readSeeds } from "./dotenv.ts";
-import { OWN_TYPE, WITHHELD, sweepPayload, transcript, unmaskAssistant, unmaskInput } from "./messages.ts";
+import { OWN_TYPE, WITHHELD, sweepPayload, transcript, unmaskAssistant, unmaskInputInPlace } from "./messages.ts";
 import type { Message } from "./messages.ts";
 import { Screen } from "./screen.ts";
 import type { Detect, Item } from "./screen.ts";
 import { Vault } from "./vault.ts";
 
-/** Told to the model while masking. It must not itself contain anything shaped like a placeholder. */
 export const PROMPT_NOTE = [
 	"Some private values in this conversation (names, addresses, secrets and the like) have been replaced by numbered placeholders: a kind and a number in angle brackets, in the form <KIND_n>. Each stands for one exact value that you cannot see.",
 	"- Use a placeholder exactly as written wherever its value is needed: in replies, in file contents and in tool arguments. The real value is put in before a tool runs and before the user reads your reply.",
@@ -60,7 +27,6 @@ const USAGE = "Usage: /privacy [mask | report | off | list [full] | reveal <plac
 
 type Level = "info" | "warning" | "error";
 
-// The parts of Pi's extension API that are used here (docs/extensions.md), so that this file needs nothing from Pi to load.
 interface Ctx {
 	hasUI: boolean;
 	cwd: string;
@@ -84,56 +50,44 @@ interface DetectorLike {
 	retry(): void;
 }
 
-/** What a test replaces; Pi uses the defaults. */
 export interface Dependencies {
 	env?: Record<string, string | undefined>;
 	home?: string;
 	detector?: (config: Config) => DetectorLike;
-	/** Pi's own package, for its summary functions; loaded only when a summary is needed. */
 	importPi?: () => Promise<any>;
-	/** Where notices go when there is no screen to show them on. */
 	log?: (message: string) => void;
 }
 
-/** One session's state. Built at `session_start`, and again after /new, /resume, /fork and /reload. */
 interface Session {
 	config: Config;
 	configFile: string;
 	mode: Mode;
 	screen: Screen;
 	detector: DetectorLike;
-	/** Why the detector cannot be used, in words; undefined while it works. */
-	trouble?: string;
-	/** Whether the request the model is answering went out masked. Only then do the placeholders it writes stand for values. */
+	detectorError?: string;
 	answersMasked: boolean;
-	/** The check of the conversation this session started with, begun ahead of its first request. It never rejects. */
-	ahead?: Promise<unknown>;
+	prescanPromise?: Promise<unknown>;
 	seeded: Set<string>;
 	envFiles: string[];
-	/** Notices that are given once. */
-	told: Set<string>;
+	shownNotices: Set<string>;
 	withheld: number;
-	/** Tool calls whose arguments got their values when the reply came in, so that the tool hook does not do it again. */
-	settled: Map<string, ReadonlyMap<string, string>>;
+	unmaskedToolCalls: Map<string, ReadonlyMap<string, string>>;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-/** `opf-mlx serve` from the project this extension is part of, else the one on the PATH. */
 function defaultCommand(): string[] {
 	try {
 		const here = realpathSync(dirname(fileURLToPath(import.meta.url)));
 		const beside = join(here, "..", "..", ".venv", "bin", "opf-mlx");
 		if (existsSync(beside)) return [beside, "serve", "--no-download"];
 	} catch {
-		// fall through
 	}
 	return ["opf-mlx", "serve", "--no-download"];
 }
 
-/** Enough of a value to recognise it by, without spelling it out on screen. */
 function preview(value: string): string {
 	const shown = value.length >= 12 ? `${value.slice(0, 2)}…${value.slice(-2)}` : value.length >= 6 ? `${value[0]}…` : "…";
 	return `${shown.replace(/\s/g, " ")}  (${plural(value.length, "character")})`;
@@ -156,12 +110,11 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		}
 	}
 	function sayOnce(s: Session, ctx: Ctx, about: string, message: string, level: Level): void {
-		if (s.told.has(about)) return;
-		s.told.add(about);
+		if (s.shownNotices.has(about)) return;
+		s.shownNotices.add(about);
 		say(ctx, message, level);
 	}
 
-	/** Save one fact with the session: a placeholder, what a provider wrote, or a reveal. Never throws. */
 	function save(data: Record<string, unknown>): void {
 		try {
 			pi.appendEntry(OWN_TYPE, { v: 1, ...data });
@@ -186,7 +139,6 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		const detector = dependencies.detector?.(config) ?? new Detector({ ...config.server, command: config.server.command ?? defaultCommand() });
 		const screen = new Screen(detector.detect, { vault, labels: config.labels });
 
-		// Everything from every branch of the session: a number, once given, must never mean a second value.
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== OWN_TYPE || !isRecord(entry.data)) continue;
 			const { kind, token, value, key, masked, revealed } = entry.data;
@@ -197,7 +149,7 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		vault.onAllocate = (entry) => save({ kind: "value", token: entry.token, value: entry.value });
 		screen.onRemember = (key, masked) => save({ kind: "remember", key, masked });
 
-		const made: Session = { config, configFile, mode: config.mode, screen, detector, answersMasked: false, seeded: new Set(), envFiles: [], told: new Set(), withheld: 0, settled: new Map() };
+		const made: Session = { config, configFile, mode: config.mode, screen, detector, answersMasked: false, seeded: new Set(), envFiles: [], shownNotices: new Set(), withheld: 0, unmaskedToolCalls: new Map() };
 		if (problems.length > 0) {
 			say(ctx, `${configFile} has ${problems.length === 1 ? "a mistake" : "mistakes"}. The screen is on; what is wrong keeps its default.\n- ${problems.join("\n- ")}`, "error");
 		}
@@ -207,58 +159,47 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 	const ready = (ctx: Ctx): Session => (session ??= open(ctx));
 
 	const isLocal = (s: Session, ctx: Ctx) => !s.config.screenLocalModels && isLocalModel(ctx.model, s.config);
-	/** How requests to the current model are treated: masked, only looked at, or left alone. */
 	const screening = (s: Session, ctx: Ctx): "mask" | "report" | undefined => (s.mode === "off" || isLocal(s, ctx) ? undefined : s.mode);
 
 	function refresh(ctx: Ctx, s: Session): void {
-		if (s !== session) return; // that session has ended; the line belongs to the next one
+		if (s !== session) return;
 		const hidden = s.screen.vault.entries.filter((entry) => !entry.revealed).length;
 		let text: string;
 		if (s.mode === "off") text = "privacy: OFF";
 		else if (isLocal(s, ctx)) text = "privacy: local model, not screened";
 		else if (s.mode === "report") text = `privacy: report only (${hidden} found)`;
-		else if (s.trouble) text = "privacy: DETECTOR DOWN, nothing is sent";
+		else if (s.detectorError) text = "privacy: DETECTOR DOWN, nothing is sent";
 		else text = `privacy: mask (${hidden} hidden)`;
 		try {
 			ctx.ui.setStatus("privacy", text);
 		} catch {
-			// a status line is a nicety
 		}
 	}
 
-	/** Start the detector ahead of the first request, without waiting for it. */
 	function warm(ctx: Ctx, s: Session): void {
 		void s.detector.ensure().then(
 			() => {
-				s.trouble = undefined;
+				s.detectorError = undefined;
 				refresh(ctx, s);
 			},
 			(error) => {
-				s.trouble = reasonOf(error);
+				s.detectorError = reasonOf(error);
 				refresh(ctx, s);
-				if (s.mode === "mask") sayOnce(s, ctx, `down:${s.trouble}`, `${s.trouble}. Until the detector runs, messages are not sent. /privacy retry tries again; /privacy off sends without screening.`, "warning");
+				if (s.mode === "mask") sayOnce(s, ctx, `down:${s.detectorError}`, `${s.detectorError}. Until the detector runs, messages are not sent. /privacy retry tries again; /privacy off sends without screening.`, "warning");
 			},
 		);
 	}
 
-	/**
-	 * Check the conversation a session starts with, without waiting for it. The detector takes a moment for
-	 * each text and a long session has hundreds of them: this way the time passes while the user is typing
-	 * and not after they have sent. It is a head start and nothing more. What it finds is what the first
-	 * request then finds already checked, and whatever fails here fails again there, where it is dealt with.
-	 */
 	function headStart(ctx: Ctx, s: Session): void {
 		try {
 			const messages = ctx.sessionManager.buildSessionProjection?.().messages;
 			if (!Array.isArray(messages) || messages.length === 0) return;
 			const plan = transcript(messages as Message[], { provider: ctx.model?.provider });
-			s.ahead = s.screen.mask(plan.items).then(() => refresh(ctx, s));
+			s.prescanPromise = s.screen.mask(plan.items).then(() => refresh(ctx, s));
 		} catch {
-			// then the first request does all of it
 		}
 	}
 
-	/** Read the project's `.env` files, again each time: they change. */
 	async function learn(ctx: Ctx, s: Session): Promise<void> {
 		const { seeds, files } = await readSeeds(ctx.cwd, s.config.envFiles);
 		const fresh = seeds.filter((seed) => !s.seeded.has(seed));
@@ -267,16 +208,14 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		s.envFiles = files;
 	}
 
-	/** Stop the request and send nothing of it: the answer to any failure on the way out. */
 	function withholdAll(ctx: Ctx, error: unknown): { messages: Message[] } {
 		say(ctx, `the request could not be screened (${reasonOf(error)}). It was stopped and nothing of it was sent.`, "error");
 		try {
 			ctx.abort();
 		} catch {
-			// the messages below hold nothing either way
 		}
 		const timestamp = Date.now();
-		return { messages: [{ role: "system", content: WITHHELD, timestamp }, { role: "user", content: WITHHELD, timestamp }] }; // fmt: skip
+		return { messages: [{ role: "system", content: WITHHELD, timestamp }, { role: "user", content: WITHHELD, timestamp }] };
 	}
 
 	/**
@@ -297,14 +236,11 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		};
 	}
 
-	/** A summary as the model wrote it, with its values put back, and remembered so that it goes out the same again. */
 	function restored(s: Session, summary: string): string {
 		const real = s.screen.unmask(summary);
 		s.screen.remember(real, summary);
 		return real;
 	}
-
-	// ------------------------------------------------------------- lifecycle
 
 	pi.on("session_start", async (_event, ctx) => {
 		session = undefined;
@@ -321,7 +257,6 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		try {
 			ctx.ui.setStatus("privacy", undefined);
 		} catch {
-			// nothing to clear
 		}
 	});
 
@@ -331,25 +266,21 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		if (screening(s, ctx)) warm(ctx, s);
 	});
 
-	// ------------------------------------------------------------ on the way out
-
 	pi.on("input", async (event, ctx) => {
 		const s = ready(ctx);
-		// Text that arrives while a reply is streaming is checked with the next request; so is an extension's.
 		if (screening(s, ctx) !== "mask" || event.source === "extension" || event.streamingBehavior !== undefined) return { action: "continue" };
 		try {
 			await s.detector.ensure();
-			s.trouble = undefined;
+			s.detectorError = undefined;
 			return { action: "continue" };
 		} catch (error) {
-			s.trouble = reasonOf(error);
+			s.detectorError = reasonOf(error);
 			refresh(ctx, s);
 			try {
 				if (typeof event.text === "string") ctx.ui.setEditorText?.(event.text);
 			} catch {
-				// then it has to be typed again
 			}
-			say(ctx, `${s.trouble}. Your message was not sent. /privacy retry tries the detector again; /privacy off sends without screening.`, "error");
+			say(ctx, `${s.detectorError}. Your message was not sent. /privacy retry tries the detector again; /privacy off sends without screening.`, "error");
 			return { action: "handled" };
 		}
 	});
@@ -373,13 +304,13 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 			const how = screening(s, ctx);
 			s.answersMasked = how === "mask";
 			if (!how) return undefined;
-			await s.ahead; // most of these texts are being checked already: that is waited for, not asked for again
+			await s.prescanPromise;
 			const plan = transcript(event.messages, { provider: ctx.model?.provider });
 			const masked = await s.screen.mask(plan.items);
 			s.screen.endPass();
 			const problem = masked.problem;
-			if (problem) s.trouble = problem.down ? problem.error.message : s.trouble;
-			else s.trouble = undefined;
+			if (problem) s.detectorError = problem.down ? problem.error.message : s.detectorError;
+			else s.detectorError = undefined;
 
 			if (how === "report") {
 				if (problem) sayOnce(s, ctx, "report", `${plural(problem.count, "text")} could not be checked (${problem.error.message}), so the report is incomplete. Report mode changes nothing: the request was sent as it is.`, "warning");
@@ -415,13 +346,10 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 			try {
 				ctx.abort();
 			} catch {
-				// nothing more can be done from here
 			}
 			return undefined;
 		}
 	});
-
-	// ------------------------------------------------------------- on the way in
 
 	pi.on("message_end", (event, ctx) => {
 		try {
@@ -429,7 +357,7 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 			if (!s.answersMasked) return undefined;
 			const unmasked = unmaskAssistant(event.message, s.screen, { shell: s.config.shellTools, code: s.config.codeTools });
 			if (!unmasked) return undefined;
-			for (const [id, record] of unmasked.settled) s.settled.set(id, record);
+			for (const [id, record] of unmasked.settled) s.unmaskedToolCalls.set(id, record);
 			return { message: unmasked.message };
 		} catch (error) {
 			say(ctx, `a reply could not be given its values back (${reasonOf(error)}); it is shown with its placeholders.`, "warning");
@@ -437,21 +365,16 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		}
 	});
 
-	// Whatever is still masked when a tool is about to run: a call that was stored as the model wrote it, or one
-	// made by another tool. An error thrown here blocks the tool, which is the safe way to fail.
 	pi.on("tool_call", (event, ctx) => {
 		const s = ready(ctx);
 		if (!s.answersMasked) return undefined;
-		if (s.config.codeTools.includes(event.toolName)) return undefined; // the calls such code makes come here themselves
-		const settled = s.settled.get(event.toolCallId);
-		s.settled.delete(event.toolCallId);
-		const refusal = unmaskInput(event.input, s.screen, s.config.shellTools[event.toolName] ?? [], { settled });
-		return refusal === undefined ? undefined : { block: true, reason: refusal };
+		if (s.config.codeTools.includes(event.toolName)) return undefined;
+		const settled = s.unmaskedToolCalls.get(event.toolCallId);
+		s.unmaskedToolCalls.delete(event.toolCallId);
+		const result = unmaskInputInPlace(event.input, s.screen, s.config.shellTools[event.toolName] ?? [], { settled });
+		return result.ok ? undefined : { block: true, reason: result.refusal };
 	});
 
-	// What is on screen. Thinking is stored as the model wrote it, so it is shown with its values whenever it is
-	// shown. The text of a reply is stored with its values: only one that is still coming in has placeholders,
-	// and what looks like one afterwards is text.
 	pi.registerMarkdownTransformer?.(
 		(markdown: string, context?: { messageType?: string; isStreaming?: boolean }) => {
 			if (!session) return markdown;
@@ -460,8 +383,6 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		},
 		{ messageTypes: ["assistant", "assistant-thinking"] },
 	);
-
-	// --------------------------------------------------------------- summaries
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		const s = ready(ctx);
@@ -499,8 +420,6 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		}
 	});
 
-	// ----------------------------------------------------------------- command
-
 	async function describe(ctx: Ctx, s: Session): Promise<string> {
 		const entries = s.screen.vault.entries;
 		const revealed = entries.filter((entry) => entry.revealed).length;
@@ -511,7 +430,7 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 		return [
 			`mode: ${s.mode}${s.mode === s.config.mode ? "" : ` (for this session; the settings say ${s.config.mode})`}`,
 			`model: ${model}, ${treated}`,
-			`detector: ${health ? `running${about ? ` (${about})` : ""}` : `not running${s.trouble ? ` (${s.trouble})` : ""}`}, ${s.config.server.socket}`,
+			`detector: ${health ? `running${about ? ` (${about})` : ""}` : `not running${s.detectorError ? ` (${s.detectorError})` : ""}`}, ${s.config.server.socket}`,
 			`${plural(entries.length - revealed, "value")} hidden, ${revealed} revealed; ${plural(s.withheld, "text")} withheld because they could not be checked`,
 			`.env: ${s.envFiles.length > 0 ? `${plural(s.seeded.size, "value")} known from ${s.envFiles.join(", ")}` : "no file read"}`,
 			`looks for: ${s.config.labels.join(", ")}, and known key formats`,
@@ -533,7 +452,7 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 				say(ctx, `\n${await describe(ctx, s)}`);
 			} else if (name === "mask" || name === "report" || name === "off") {
 				s.mode = name;
-				s.told.clear();
+				s.shownNotices.clear();
 				if (name === "mask") {
 					s.detector.retry();
 					say(ctx, "masking. Private values are replaced by placeholders before anything is sent.");
@@ -545,7 +464,7 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 				if (screening(s, ctx)) warm(ctx, s);
 			} else if (name === "retry") {
 				s.detector.retry();
-				s.told.clear();
+				s.shownNotices.clear();
 				warm(ctx, s);
 				say(ctx, "trying the detector again.");
 			} else if (name === "list") {
@@ -553,8 +472,6 @@ export function install(pi: Pi, dependencies: Dependencies = {}): void {
 				const lines = entries.map((entry) => `${entry.token}  ${argument === "full" ? entry.value : preview(entry.value)}${entry.revealed ? "  (revealed: sent as it is)" : ""}`);
 				say(ctx, entries.length > 0 ? `${plural(entries.length, "value")} known in this session. This list is shown here only.\n${lines.join("\n")}` : "no value has been hidden in this session yet.");
 			} else if (name === "reveal" || name === "conceal") {
-				// By its placeholder, or by the value itself: a reply that says which placeholder to reveal is shown
-				// with the value in its place.
 				const what = args.trim().slice(name.length).trim();
 				const bare = what.replace(/^<|>$/g, "").toUpperCase();
 				const token = s.screen.vault.lookup(`<${bare}>`)?.token ?? s.screen.vault.find(what)?.token;

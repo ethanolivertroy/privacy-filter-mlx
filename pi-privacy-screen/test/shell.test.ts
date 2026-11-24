@@ -23,8 +23,6 @@ function refused(command: string, value: string): string {
 	return result.refused;
 }
 
-// ------------------------------------------------------------ on paper
-
 test("a command without a known placeholder is returned as it is", () => {
 	for (const command of ["ls -la", "echo <SECRET_9> | cat", "echo `date` $((1+2)) ${HOME} \"$(case x in x) echo y;; esac)\"", "echo 'unterminated"]) {
 		assert.deepEqual(embed(command, valueIs("x")), { command });
@@ -126,8 +124,6 @@ test("after syntax it does not follow, a placeholder is refused rather than gues
 	}
 });
 
-// ---------------------------------------------------- in the real shells
-
 const CANARY = "CANARY";
 const HOSTILE = [
 	"plain-word1",
@@ -174,11 +170,8 @@ const HOSTILE = [
 
 interface Template {
 	command: string;
-	/** Shells (by name) that have the syntax; all three by default. */
 	shells?: string[];
-	/** Values this use must refuse. */
 	refuses?: (value: string) => boolean;
-	/** False for a use whose output does not show the value (a comment). */
 	shows?: boolean;
 }
 
@@ -246,7 +239,6 @@ for (const shell of SHELLS) {
 		let checked = 0;
 		for (const template of TEMPLATES) {
 			if (template.shells && !template.shells.includes(basename(shell))) continue;
-			// What the model wrote, with a harmless word for the value: that is what the command must keep meaning.
 			const harmless = run(shell, template.command.replaceAll(T, "MARK"));
 			assert.deepEqual([harmless.status, harmless.stderr], [0, ""], `the template itself fails: ${template.command}`);
 			if (template.shows !== false) assert.ok(harmless.stdout.includes("MARK"), `the template shows nothing: ${template.command}`);

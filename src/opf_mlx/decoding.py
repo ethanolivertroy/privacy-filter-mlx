@@ -20,7 +20,7 @@ import numpy as np
 
 from .labels import LabelSpace
 
-NEG_INF = -1e9  # the reference's "impossible" score; finite on purpose
+FORBIDDEN_SCORE = -1e9
 
 BIAS_KEYS: tuple[str, ...] = (
     "transition_bias_background_stay",
@@ -48,9 +48,9 @@ class ViterbiDecoder:
 
         n = len(space.class_names)
         self.num_classes = n
-        self.start = np.full((n,), NEG_INF, dtype=np.float32)
-        self.end = np.full((n,), NEG_INF, dtype=np.float32)
-        self.transition = np.full((n, n), NEG_INF, dtype=np.float32)
+        self.start = np.full((n,), FORBIDDEN_SCORE, dtype=np.float32)
+        self.end = np.full((n,), FORBIDDEN_SCORE, dtype=np.float32)
+        self.transition = np.full((n, n), FORBIDDEN_SCORE, dtype=np.float32)
 
         starts_span = [tag in ("B", "S") for tag in space.tag_of]
         background = [tag is None for tag in space.tag_of]
@@ -65,17 +65,17 @@ class ViterbiDecoder:
             for nxt in range(n):
                 next_tag = space.tag_of[nxt]
                 same_category = space.span_of[prev] == space.span_of[nxt]
-                if prev_tag in ("B", "I"):  # inside a span: continue it or end it
+                if prev_tag in ("B", "I"):
                     if same_category and next_tag == "I":
                         self.transition[prev, nxt] = biases["transition_bias_inside_to_continue"]
                     elif same_category and next_tag == "E":
                         self.transition[prev, nxt] = biases["transition_bias_inside_to_end"]
-                elif background[prev]:  # outside any span
+                elif background[prev]:
                     if background[nxt]:
                         self.transition[prev, nxt] = biases["transition_bias_background_stay"]
                     elif starts_span[nxt]:
                         self.transition[prev, nxt] = biases["transition_bias_background_to_start"]
-                else:  # just finished a span ("E" or "S")
+                else:
                     if background[nxt]:
                         self.transition[prev, nxt] = biases["transition_bias_end_to_background"]
                     elif starts_span[nxt]:
@@ -96,8 +96,8 @@ class ViterbiDecoder:
         scores = logp[0] + self.start
         backpointers = np.empty((seq_len - 1, self.num_classes), dtype=np.int64)
         for t in range(1, seq_len):
-            candidates = scores[:, None] + self.transition  # [previous, next]
-            best_previous = candidates.argmax(axis=0)  # ties go to the lowest index
+            candidates = scores[:, None] + self.transition
+            best_previous = candidates.argmax(axis=0)
             backpointers[t - 1] = best_previous
             scores = candidates[best_previous, columns] + logp[t]
 

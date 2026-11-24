@@ -1,8 +1,3 @@
-/**
- * The extension as Pi sees it: its event handlers and its command, driven through a stand-in for
- * Pi's extension API. The real Pi is exercised in test/e2e.
- */
-
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,14 +23,11 @@ interface Options {
 	entries?: any[];
 	model?: object;
 	values?: Record<string, string>;
-	/** In place of `values`: what the detector finds in one text. */
 	detect?: (text: string) => Span[];
 	cwd?: string;
 	hasUI?: boolean;
 	importPi?: () => Promise<any>;
-	/** What Pi says the conversation holds when the session starts: its messages, or a function that gives them. */
 	history?: any[] | (() => unknown);
-	/** The detector waits for this before it answers. */
 	gate?: () => Promise<void>;
 }
 
@@ -139,7 +131,6 @@ function harness(options: Options = {}) {
 	return { ctx, emit, send, command, commands, entries, ownEntries, notes, status, detector, seen, dir, transformer: () => transformer!, start: () => emit("session_start", { reason: "startup" }) };
 }
 
-/** Everything that is waiting on a promise alone has run. */
 const idle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 const user = (text: string) => ({ role: "user", content: text, timestamp: 1 });
@@ -223,7 +214,6 @@ test("a reply's tool calls are stored as they will run, and are not given their 
 test("a value that itself reads like a placeholder is put in once, and is still that text when the tool runs", async () => {
 	const h = harness();
 	await h.start();
-	// A file that happens to hold the text "<EMAIL_1>". To the model it is <LITERAL_1>, so that it cannot be taken for the address.
 	const out = await h.send(user(`mail ${EMAIL}`), toolResult("the template says: Dear <EMAIL_1>,"));
 	const reply = assistant({ type: "toolCall", id: "w", name: "write", arguments: { path: "copy.txt", content: "Dear <LITERAL_1>," } });
 
@@ -296,7 +286,7 @@ test("a failure inside the screen never lets a request through as it was", async
 	const h = harness();
 	await h.start();
 	const poisoned = { role: "user", timestamp: 1 };
-	Object.defineProperty(poisoned, "content", { enumerable: true, get: () => { throw new Error("boom"); } }); // fmt: skip
+	Object.defineProperty(poisoned, "content", { enumerable: true, get: () => { throw new Error("boom"); } });
 
 	const result = await h.emit("context_with_system", { messages: [{ role: "system", content: "x", timestamp: 0 }, poisoned] });
 
@@ -354,7 +344,7 @@ test("the early check is a head start and nothing more: when it cannot be made i
 	assert.equal(down.seen.aborted, 0);
 	assert.equal(sent[0].content, "mail <EMAIL_1>");
 
-	const broken = harness({ history: () => { throw new Error("no projection"); } }); // fmt: skip
+	const broken = harness({ history: () => { throw new Error("no projection"); } });
 	await broken.start();
 	await idle();
 	assert.deepEqual([broken.notes, broken.seen.errors], [[], []]);
@@ -439,7 +429,7 @@ test("off screens nothing; the reply that was still on its way gets its values, 
 test("report mode changes nothing on the way in either", async () => {
 	const h = harness({ config: { mode: "report" } });
 	await h.start();
-	await h.send(user(`mail ${EMAIL}`)); // counted as <EMAIL_1>, and sent as it is
+	await h.send(user(`mail ${EMAIL}`));
 	const call = { type: "toolCall", id: "w", name: "write", arguments: { path: "doc.md", content: "Write <EMAIL_1> for the address." } };
 
 	const ended = await h.emit("message_end", { message: assistant(text("The docs say <EMAIL_1>."), call) });
@@ -488,7 +478,6 @@ test("placeholders and what the model wrote survive a restart of the session", a
 	const first = harness();
 	await first.start();
 	await first.send(user(`mail ${EMAIL}`));
-	// Glued to a letter, the address would not be recognised again by looking for the value: it has to be remembered.
 	const reply = await first.emit("message_end", { message: assistant(text("Sure: mailto:<EMAIL_1>x")) });
 
 	const second = harness({ entries: structuredClone(first.entries), values: { [EMAIL]: "private_email", "omar@example.com": "private_email" } });
@@ -671,11 +660,6 @@ test("a reply is shown with its values while it streams; once it is stored it ha
 	assert.deepEqual(h.transformer().options, { messageTypes: ["assistant", "assistant-thinking"] });
 });
 
-/**
- * What Pi's `compact` and `generateBranchSummary` do with the stream function they are given: one summary
- * request, with the conversation written out as the text of a user message. `answers` is what the model
- * and Pi make of it.
- */
 function fakeCompaction(calls: any[], answers: { prompt?: string; summary?: string; branch?: object } = {}) {
 	const written = (messages: any[]) => messages.map((message) => `[User]: ${message.content}`).join("\n");
 	return async () => ({
@@ -756,7 +740,6 @@ test("in a summary request the conversation is material to check: a placeholder 
 });
 
 test("a summary goes back out as the model wrote it, also where nothing would find the value in it again", async () => {
-	// Like the real detector, this one needs context: it knows the name only after "colleague".
 	const detect = (value: string): Span[] => {
 		const at = value.indexOf("colleague Xu");
 		return at === -1 ? [] : [{ start: at + 10, end: at + 12, label: "private_person" }];

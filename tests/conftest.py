@@ -1,10 +1,3 @@
-"""Shared fixtures.
-
-`RELEASED_CONFIG` is a literal copy of `original/config.json` from
-huggingface.co/openai/privacy-filter at revision 7ffa9a04, so tests can check
-the released model's contract without the 2.8 GB checkpoint.
-"""
-
 from __future__ import annotations
 
 import os
@@ -40,10 +33,6 @@ RELEASED_CONFIG: dict[str, object] = {
     "param_dtype": "bfloat16",
 }
 
-# A small model with the same structure as the released one: grouped-query
-# attention (6 query heads on 2 KV heads), a narrow band so that short test
-# sequences exceed it, several experts with top-2 routing, and YaRN-blended
-# RoPE. The vocabulary must still cover every o200k_base token id.
 TINY_CONFIG: dict[str, object] = {
     **RELEASED_CONFIG,
     "num_hidden_layers": 2,
@@ -76,8 +65,7 @@ def tiny_config() -> dict[str, object]:
     return dict(TINY_CONFIG)
 
 
-# Where the installed checkpoint is, read once, before any test changes the environment.
-_INSTALLED = (
+_CHECKPOINT_BEFORE_ISOLATION = (
     Path(os.environ["OPF_CHECKPOINT"]).expanduser()
     if os.environ.get("OPF_CHECKPOINT")
     else Path.home() / ".opf" / "privacy_filter"
@@ -86,19 +74,13 @@ _INSTALLED = (
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path_factory, monkeypatch):
-    """Every test gets an empty HOME and no OPF_CHECKPOINT.
-
-    The code under test resolves and downloads checkpoints. If it is wrong, it
-    must be wrong inside a temporary directory, never in the real home.
-    """
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
     monkeypatch.delenv("OPF_CHECKPOINT", raising=False)
 
 
 def real_checkpoint_dir() -> Path | None:
-    """The installed checkpoint directory, or None. Tests may read it; nothing writes there."""
-    if (_INSTALLED / "config.json").is_file() and (_INSTALLED / "model.safetensors").is_file():
-        return _INSTALLED
+    if (_CHECKPOINT_BEFORE_ISOLATION / "config.json").is_file() and (_CHECKPOINT_BEFORE_ISOLATION / "model.safetensors").is_file():
+        return _CHECKPOINT_BEFORE_ISOLATION
     return None
 
 

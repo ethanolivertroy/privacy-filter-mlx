@@ -1,19 +1,3 @@
-/**
- * Values the screen should know before anyone types them: the secrets in the
- * project's `.env` files.
- *
- * A detector guesses; a value read from `.env` is known. Each one is given to
- * `Screen.seed`, and from then on it is replaced wherever it turns up in
- * outbound text, whether or not the detector would have noticed it. Nothing
- * is sent anywhere by reading the files, and a value that never turns up never
- * gets a placeholder.
- *
- * Only values that are meant to be secret are taken: those assigned to a name
- * that says so (`*_TOKEN`, `*_SECRET`, `DB_PASSWORD`...), and anything in a
- * known key format. A region, a port or a bucket name is left alone, or the
- * model would see placeholders where it needs to read plain settings.
- */
-
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -24,14 +8,11 @@ const MIN_LENGTH = 8;
 
 const SECRET_NAME =
 	/SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|PRIVATE|SIGNING|ENCRYPTION|SALT|HMAC|API_?KEY|ACCESS_?KEY|AUTH_?KEY|(^|_)(KEY|PAT|PWD|PASS)$/i;
-/** Names whose values are shipped to browsers, or are public by definition. */
 const PUBLIC_NAME = /^(NEXT_PUBLIC_|NUXT_PUBLIC_|EXPO_PUBLIC_|PUBLIC_|VITE_|REACT_APP_|GATSBY_)|PUBLIC_?KEY|PUBLISHABLE/i;
-/** Files that hold examples rather than values, by the usual names. */
 const EXAMPLE_FILE = /\.(example|sample|template|dist|defaults)$/i;
 
 const ASSIGNMENT = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$/;
 
-/** A setting rather than a secret: a number, a switch, a path, an address, or a reference to another variable. */
 function isSetting(value: string): boolean {
 	return (
 		/^[-+]?[0-9.,_]+$/.test(value) ||
@@ -42,7 +23,6 @@ function isSetting(value: string): boolean {
 	);
 }
 
-/** The value of one line: unquoted, and for double quotes also with its escapes read. Undefined if the quote never closes. */
 function valuesOf(raw: string): string[] | undefined {
 	const text = raw.trim();
 	const quote = text[0];
@@ -58,7 +38,6 @@ function valuesOf(raw: string): string[] | undefined {
 	return [text.replace(/\s+#.*$/, "")];
 }
 
-/** The secrets in the content of one `.env` file. */
 export function seedsFrom(content: string): string[] {
 	const seeds = new Set<string>();
 	for (const line of content.split(/\r?\n/)) {
@@ -74,7 +53,6 @@ export function seedsFrom(content: string): string[] {
 	return [...seeds];
 }
 
-/** `pattern` with `*` for any run of characters; like a shell, a leading `*` does not match a leading dot. */
 function matches(name: string, pattern: string): boolean {
 	const body = pattern
 		.split("*")
@@ -84,13 +62,11 @@ function matches(name: string, pattern: string): boolean {
 	return new RegExp(`^${body}$`).test(name);
 }
 
-/** Of the names in a directory, those the patterns select, without the files that only hold examples. */
 export function selectEnvFiles(names: readonly string[], patterns: readonly string[]): string[] {
 	const usable = patterns.filter((pattern) => !pattern.includes("/") && !pattern.includes("\\"));
 	return names.filter((name) => !EXAMPLE_FILE.test(name) && usable.some((pattern) => matches(name, pattern)));
 }
 
-/** Read the `.env` files of `directory`. Never rejects: a file that cannot be read contributes nothing. */
 export async function readSeeds(directory: string, patterns: readonly string[]): Promise<{ seeds: string[]; files: string[]; skipped: string[] }> {
 	const seeds = new Set<string>();
 	const files: string[] = [];

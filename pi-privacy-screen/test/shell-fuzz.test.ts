@@ -1,14 +1,3 @@
-/**
- * Random commands, hostile values, real shells: whatever `embed` agrees to place must never run.
- *
- * Every value below tries, in its own way, to create a file called CANARY. A command is built at
- * random from the constructs `embed` supports, nested in each other, with placeholders scattered
- * through it. If `embed` refuses, fine. If it places the value, the command is run, and the file
- * must not appear.
- *
- * SHELL_FUZZ=2000 node --test test/shell-fuzz.test.ts   runs more commands (default 80, seeded).
- */
-
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -52,7 +41,6 @@ const ATTACKS = [
 	"a' b\" c` d$(touch CANARY)",
 ];
 
-/** A small seeded generator (mulberry32), so that a failure can be reproduced. */
 function random(seed: number) {
 	let state = seed >>> 0;
 	const next = () => {
@@ -151,7 +139,6 @@ for (const shell of SHELLS) {
 		for (let round = 0; round < ROUNDS; round++) {
 			const command = make.command();
 			if (!command.includes(T)) continue;
-			// With a harmless word for the value the command has to be a working one, or the run proves nothing.
 			const harmless = run(shell, command.replaceAll(T, "MARK"));
 			if (harmless.status !== 0 || harmless.stderr !== "") continue;
 			commands++;

@@ -1,9 +1,3 @@
-"""`opf-mlx serve`: the command that puts a real model behind `opf_mlx.serve`.
-
-The checkpoints are rigged (see test_pipeline.py), so what the model finds in
-a text can be read off its tokens.
-"""
-
 import http.client
 import json
 import os
@@ -51,8 +45,6 @@ def short_dir():
 
 
 class Server:
-    """`python -m opf_mlx serve ...` as a child process."""
-
     def __init__(self, *arguments: str) -> None:
         self.process = subprocess.Popen(
             [sys.executable, "-m", "opf_mlx", "serve", *arguments],
@@ -61,7 +53,7 @@ class Server:
         self.address = ""
 
     def wait_until_listening(self) -> str:
-        line = self.process.stdout.readline()  # the one line it prints; an early exit gives ""
+        line = self.process.stdout.readline()
         assert line.startswith("listening on "), (line, self.process.stderr.read())
         self.address = line[len("listening on ") :].strip()
         return self.address
@@ -100,9 +92,6 @@ class Server:
             self.process.communicate()
 
 
-# ------------------------------------------------------------- in process
-
-
 def test_the_detector_reports_spans_of_the_text_it_was_given(checkpoint):
     arguments = cli.parse_serve_arguments(["--checkpoint", checkpoint])
     detect = cli.detector_for(cli.build_filter(arguments))
@@ -115,7 +104,7 @@ def test_an_input_split_into_windows_is_reported_in_the_result_not_printed(check
     arguments = cli.parse_serve_arguments(["--checkpoint", checkpoint, "--n-ctx", "4"])
     detect = cli.detector_for(cli.build_filter(arguments))
 
-    detection = detect(SENTENCE)  # more than 4 tokens; a warning raised here would fail the test
+    detection = detect(SENTENCE)
 
     assert [label for _, _, label in detection.spans][:1] == ["private_person"]
     assert detection.warning.startswith("Input has 12 tokens but the context window holds 4 (n_ctx), so it was processed in 3 consecutive windows.")
@@ -133,7 +122,7 @@ def test_serve_always_keeps_the_categories_and_takes_the_runtime_flags(checkpoin
 
 def test_the_default_socket_is_in_the_users_opf_directory():
     assert serve.default_socket_path() == Path.home() / ".opf" / "opf-mlx.sock"
-    assert cli.parse_serve_arguments([]).socket is None  # resolved when serving, after HOME is known
+    assert cli.parse_serve_arguments([]).socket is None
 
 
 @pytest.mark.parametrize(
@@ -179,10 +168,7 @@ def test_a_missing_checkpoint_is_a_one_line_error_and_leaves_no_socket(short_dir
 
     assert capsys.readouterr().err == f"error: Checkpoint directory not found: {short_dir / 'nowhere'}\n"
     assert not path.exists()
-    serve.SocketClaim(path).release()  # and the path is free again
-
-
-# -------------------------------------------------------- process-level
+    serve.SocketClaim(path).release()
 
 
 def test_serving_on_a_unix_socket_until_told_to_stop(checkpoint, short_dir):
@@ -249,7 +235,6 @@ def test_a_second_server_on_the_same_socket_gives_up_at_once(checkpoint, short_d
 
 
 def test_the_socket_path_can_come_from_the_home_directory(checkpoint, short_dir):
-    # HOME is where the default lives; a short one keeps the path within the system's limit.
     environment = {**os.environ, "HOME": str(short_dir)}
     process = subprocess.Popen(
         [sys.executable, "-m", "opf_mlx", "serve", "--checkpoint", checkpoint],

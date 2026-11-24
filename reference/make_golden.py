@@ -50,7 +50,6 @@ PARAGRAPH = (
     "the quarterly report looks fine and the meeting moved to Thursday afternoon.\n\n"
 )
 
-# name, text, options for the reference's `OPF(...)`
 CASES: list[tuple[str, str, dict[str, object]]] = [
     ("mixed", PARAGRAPH, {}),
     ("plain", "The committee reviewed the proposal and agreed to revisit the budget in the spring.", {}),
@@ -74,14 +73,12 @@ CASES: list[tuple[str, str, dict[str, object]]] = [
 
 
 def logits_of(model: Transformer, token_ids: list[int]) -> np.ndarray:
-    """The reference's logits for one unpadded sequence, as float32 [tokens, classes]."""
     tokens = torch.tensor([token_ids], dtype=torch.int32)
     with torch.inference_mode():
         return model(tokens, attention_mask=torch.ones_like(tokens, dtype=torch.bool))[0].float().numpy()
 
 
 def as_float32(checkpoint: Path, scratch: Path) -> Path:
-    """A directory that presents `checkpoint` as a float32 model: same files, another `param_dtype`."""
     directory = scratch / f"{checkpoint.name}-float32"
     directory.mkdir()
     config = json.loads((checkpoint / "config.json").read_text(encoding="utf-8"))
@@ -93,7 +90,6 @@ def as_float32(checkpoint: Path, scratch: Path) -> Path:
 
 
 def record_tiny(out: Path, scratch: Path) -> None:
-    """A tiny random model: its logits for five sequences and every sublayer's output for one."""
     raw = {**TINY_CONFIG, "vocab_size": 64}
     checkpoint = write_checkpoint(out / "tiny", raw, seed=11)
     rng = np.random.default_rng(11)
@@ -140,7 +136,6 @@ def record_real(out: Path, scratch: Path, checkpoint: Path) -> None:
         spans = {dtype: case["results"][dtype]["summary"]["span_count"] for dtype in DTYPES}
         print(f"  {name:<20} {len(token_ids):>5} tokens  spans {spans}", file=sys.stderr)
 
-    # The rotary tables: the first positions, then a sample all the way to the last one.
     rope = models["float32"].block[0].attn.rope
     last = rope.cos_cache.shape[0] - 1
     positions = np.unique(np.concatenate([np.arange(128), np.arange(0, last, 997), [last]]))

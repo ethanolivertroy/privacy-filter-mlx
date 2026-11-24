@@ -31,8 +31,7 @@ DEFAULT_SIZES = {"gpu": (128, 2048, 8192, 32768, 128000), "cpu": (128, 2048, 409
 
 
 def longest_prefix(encode: Callable[[str], list[int]], text: str, n_tokens: int) -> str:
-    """The longest beginning of `text` that is at most `n_tokens` tokens long."""
-    low, high = 0, len(text)  # the first `low` characters are known to fit
+    low, high = 0, len(text)
     while low < high:
         middle = (low + high + 1) // 2
         if len(encode(text[:middle])) <= n_tokens:
@@ -43,10 +42,9 @@ def longest_prefix(encode: Callable[[str], list[int]], text: str, n_tokens: int)
 
 
 def best_time(redactor: PrivacyFilter, text: str, repeats: int) -> float:
-    """Seconds taken by the fastest of `repeats` calls of `redact`."""
     best = float("inf")
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", PrivacyFilterWarning)  # the table counts the windows instead
+        warnings.simplefilter("ignore", PrivacyFilterWarning)
         for _ in range(repeats):
             started = time.perf_counter()
             redactor.redact(text)

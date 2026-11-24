@@ -8,7 +8,6 @@ import type { Span } from "../src/spans.ts";
 
 type Rule = (text: string) => boolean;
 
-/** A detector that flags `word` (as `label`) wherever the text passes `when`. It records what it was asked. */
 function detector(words: Record<string, string | [label: string, when: Rule]> = {}) {
 	const calls: string[][] = [];
 	const detect: Detect = async (texts) => {
@@ -33,7 +32,6 @@ function screenWith(words: Parameters<typeof detector>[0] = {}, labels?: string[
 	return { screen: new Screen(detect, labels ? { labels } : {}), calls };
 }
 
-// What a tool returned and what the user sent are screened alike; the two names say what a test is about.
 const tool = (text: string): Item => ({ text, origin: "input" });
 const user = tool;
 const system = (text: string): Item => ({ text, origin: "system" });
@@ -41,8 +39,6 @@ const provider = (text: string): Item => ({ text, origin: "provider" });
 
 // A made-up key, in pieces so that no scanner takes this file for a leak.
 const GITHUB = ["ghp_", "x7KqLm29ZpQrStUvWxYz", "0123456789AbCdEf"].join("");
-
-// ------------------------------------------------------------ what leaves
 
 test("what the detector finds is replaced by numbered placeholders, and nothing else changes", async () => {
 	const { screen } = screenWith({ "hunter22x!": "secret", "Lena Fischer": "private_person" });
@@ -147,13 +143,11 @@ test("an empty text needs no screening, and equal texts are checked once", async
 	assert.deepEqual(calls, [["hi Lena"]]);
 });
 
-// ------------------------------------------------- placeholder-shaped text
-
 test("text that looks like a placeholder is passed as a literal and comes back as itself, whoever it is from", async () => {
 	const { screen } = screenWith();
 	screen.vault.allocate("SECRET", "hunter22x!");
 	const read = "the README says <SECRET_1> stands for a key";
-	const pasted = "my test has expect(out).toBe('<SECRET_1>') and never <SECRET_9>"; // typed, pasted, or a file attached to the message
+	const pasted = "my test has expect(out).toBe('<SECRET_1>') and never <SECRET_9>";
 
 	const masked = (await screen.mask([tool(read), user(pasted)])).texts;
 
@@ -172,8 +166,6 @@ test("a detection around a placeholder the model was given does not replace the 
 	assert.equal(screen.vault.entries.length, 1);
 });
 
-// -------------------------------------------------------------- the prompt
-
 test("the system prompt gets known values and key formats, but is not sent to the detector", async () => {
 	const { screen, calls } = screenWith({ Omar: "private_person" });
 	screen.vault.allocate("PERSON", "Lena");
@@ -183,8 +175,6 @@ test("the system prompt gets known values and key formats, but is not sent to th
 	assert.deepEqual(result.texts, ["Maintainer: <PERSON_1>. Reviewer: Omar. Token <SECRET_1>. Placeholders look like <LITERAL_1>."]);
 	assert.deepEqual(calls, []);
 });
-
-// ------------------------------------------------------ what came from it
 
 test("text the provider wrote goes back exactly as it was sent", async () => {
 	const { screen, calls } = screenWith();
@@ -219,7 +209,7 @@ test("a placeholder the provider wrote and that was left in place stays a refere
 	screen.vault.allocate("SECRET", "hunter22x!");
 	const kept = "run it with <SECRET_1> and <SECRET_7>";
 
-	screen.remember(kept, kept); // say, an argument of a tool call that is stored as the model wrote it
+	screen.remember(kept, kept);
 	screen.remember("no placeholder in here", "no placeholder in here");
 
 	assert.deepEqual((await screen.mask([provider(kept)])).texts, [kept]);
@@ -263,8 +253,6 @@ test("placeholders in a reply become their values, once", () => {
 	assert.equal(screen.unmask("nothing here"), "nothing here");
 });
 
-// ------------------------------------------------------------- the detector
-
 test("a text is sent to the detector once, however often it is screened", async () => {
 	const { screen, calls } = screenWith({ Lena: "private_person" });
 
@@ -298,7 +286,6 @@ test("a text the detector fails on is withheld, the others are not", async () =>
 });
 
 test("a text the patterns cannot get through is withheld, the others are not", async (t) => {
-	// Millions of escaped quotes in one quoted value: the pattern engine runs out of room and throws.
 	const hostile = 'secret: "' + String.raw`\"`.repeat(6 * 1024 * 1024);
 	let thrown = false;
 	try {
@@ -318,7 +305,7 @@ test("a text the patterns cannot get through is withheld, the others are not", a
 });
 
 test("a detector that answers for a different number of texts is not believed for any of them", async () => {
-	const screen = new Screen(async () => [[]]); // one answer, whatever was asked
+	const screen = new Screen(async () => [[]]);
 
 	const result = await screen.mask([tool("one"), tool("two")]);
 
@@ -357,8 +344,6 @@ test("text that has left the conversation is forgotten", async () => {
 	assert.deepEqual(calls, [["first"], ["first"]]);
 });
 
-// ------------------------------------------------------- seeds and reveals
-
 test("a value from an environment file is replaced where it occurs, and only then gets a placeholder", async () => {
 	const { screen } = screenWith();
 	screen.seed(["correct-horse-battery-staple", "another-seed-value-1"]);
@@ -388,8 +373,6 @@ test("a revealed value is sent as it is, wherever it or its placeholder appears,
 	assert.deepEqual(concealed.texts, masked.texts);
 	assert.equal(screen.reveal("<SECRET_9>", true), false);
 });
-
-// ------------------------------------------------------- the last look
 
 test("the last look replaces known values in whatever is about to be sent, and counts them", () => {
 	const { screen } = screenWith();

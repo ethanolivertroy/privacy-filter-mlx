@@ -1,10 +1,3 @@
-"""Finding, downloading and verifying a checkpoint directory.
-
-Downloads run against a local HTTP server that lays files out the way the
-Hugging Face endpoint does, so the real transfer code is exercised without
-touching the network.
-"""
-
 import hashlib
 import os
 from pathlib import Path
@@ -25,7 +18,7 @@ from opf_mlx.checkpoint import (
 )
 
 CONFIG = b'{"model_type": "privacy_filter"}'
-WEIGHTS = bytes(range(256)) * 4000  # 1,024,000 bytes
+WEIGHTS = bytes(range(256)) * 4000
 CALIBRATION = b'{"operating_points": {}}'
 
 
@@ -35,7 +28,6 @@ def sha(data: bytes) -> str:
 
 @pytest.fixture
 def remote(tmp_path) -> Path:
-    """A directory laid out like `<repo>/resolve/<revision>/original/` on the hub."""
     root = tmp_path / "remote"
     files = root / "acme" / "tiny" / "resolve" / "rev1" / "original"
     files.mkdir(parents=True)
@@ -81,7 +73,6 @@ def test_content_that_does_not_match_the_pinned_hash_is_never_installed(tmp_path
             download_checkpoint(target, source=source(url, **{"model.safetensors": wrong}), progress=None)
 
     assert not (target / "model.safetensors").exists()
-    # Nor are the bad bytes kept for a later attempt to build on.
     assert not (target / "model.safetensors.part").exists()
 
 
@@ -93,7 +84,6 @@ def test_short_download_is_an_error(tmp_path, remote):
             download_checkpoint(target, source=source(url, **{"model.safetensors": longer}), progress=None)
 
     assert not (target / "model.safetensors").exists()
-    # What did arrive is kept, so that the next attempt can resume from it.
     assert (target / "model.safetensors.part").read_bytes() == WEIGHTS
 
 
@@ -105,13 +95,10 @@ def test_a_download_longer_than_expected_is_an_error_and_is_not_kept(tmp_path, r
             download_checkpoint(target, source=source(url, **{"model.safetensors": shorter}), progress=None)
 
     assert not (target / "model.safetensors").exists()
-    # Too many bytes cannot be the beginning of the file: there is nothing to resume from.
     assert not (target / "model.safetensors.part").exists()
 
 
 def test_a_leftover_partial_file_as_long_as_the_whole_file_is_discarded(tmp_path, remote):
-    # Such a leftover cannot be the beginning of the file, and a server refuses
-    # to send "the rest" after it (416). The download starts over instead.
     target = tmp_path / "ckpt"
     target.mkdir()
     (target / "model.safetensors.part").write_bytes(bytes(len(WEIGHTS)))
@@ -196,9 +183,6 @@ def test_released_source_is_pinned_to_a_revision_and_hashes():
         "https://huggingface.co/openai/privacy-filter/resolve/"
         "7ffa9a043d54d1be65afb281eddf0ffbe629385b/original/model.safetensors"
     )
-
-
-# --- resolution order ------------------------------------------------------
 
 
 def make_checkpoint(path: Path) -> Path:
@@ -290,8 +274,6 @@ def test_an_explicit_path_may_start_at_the_home_directory(tmp_path, monkeypatch)
 
 
 def test_the_suite_cannot_reach_the_real_home_directory(tmp_path_factory):
-    # conftest.py gives every test a temporary HOME and no OPF_CHECKPOINT. Without
-    # that, a bug in a download path writes into the checkpoint a person installed.
     assert default_checkpoint_dir().is_relative_to(tmp_path_factory.getbasetemp())
     assert "OPF_CHECKPOINT" not in os.environ
 
@@ -306,7 +288,6 @@ def test_an_existing_file_that_is_not_the_release_is_left_alone(tmp_path, remote
             download_checkpoint(target, source=source(url), progress=None)
 
     assert (target / "model.safetensors").read_bytes() == b"someone else's weights"
-    # Refused before anything was fetched: the other files were not installed either.
     assert seen == []
     assert sorted(path.name for path in target.iterdir()) == ["model.safetensors"]
 

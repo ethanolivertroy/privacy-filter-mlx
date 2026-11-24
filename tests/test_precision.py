@@ -1,11 +1,3 @@
-"""Float32 matrix products must really be float32.
-
-MLX on GPUs with neural accelerators runs float32 `matmul`, and the grouped
-product `gather_mm` the expert layers use, at reduced precision unless
-MLX_ENABLE_TF32=0 is set before the first one. The switch is read once per
-process, so the cases that change it run in a fresh interpreter.
-"""
-
 import os
 import subprocess
 import sys
@@ -28,7 +20,6 @@ def run_python(code: str, tf32: str | None = None) -> subprocess.CompletedProces
 
 
 def test_float32_matmul_is_accurate_in_this_process():
-    # Accurate float32 products of these sizes are within about 1e-6 of exact.
     assert float32_matmul_error() < TOLERANCE
 
 
@@ -77,7 +68,6 @@ def test_reduced_precision_is_refused_when_forced_on():
     assert result.returncode == 0, result.stderr
     gpu_error, cpu_error, verdict = result.stdout.strip().split("\n", 2)
 
-    # The CPU is exact whatever the switch says, so it is the fallback the error names.
     assert float(cpu_error) < TOLERANCE
     if float(gpu_error) < TOLERANCE:
         pytest.skip("this GPU has no reduced-precision float32 products")
@@ -87,8 +77,6 @@ def test_reduced_precision_is_refused_when_forced_on():
 
 
 def test_an_inaccurate_grouped_product_is_refused_even_when_matmul_is_accurate(monkeypatch):
-    # The two run in different kernels, so one being accurate says nothing
-    # about the other. No device offers this combination on demand.
     from opf_mlx import precision
 
     monkeypatch.setattr(precision, "float32_grouped_product_error", lambda: 8e-4)
@@ -99,7 +87,6 @@ def test_an_inaccurate_grouped_product_is_refused_even_when_matmul_is_accurate(m
 
 @pytest.mark.parametrize("measurement", ["float32_matmul_error", "float32_grouped_product_error"])
 def test_a_measurement_that_is_not_a_number_is_refused(monkeypatch, measurement):
-    # No real device reports NaN on demand, so the measurement is replaced.
     from opf_mlx import precision
 
     monkeypatch.setattr(precision, measurement, lambda: float("nan"))

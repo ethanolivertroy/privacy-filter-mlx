@@ -1,5 +1,3 @@
-"""Hardware and software detection."""
-
 import dataclasses
 import os
 import platform
@@ -35,7 +33,6 @@ Pages occupied by compressor:          70000.
 
 
 def test_available_memory_counts_free_inactive_and_speculative_pages():
-    # (1000 + 2000 + 300) pages * 16384 bytes
     assert parse_vm_stat(VM_STAT) == 54_067_200
 
 
@@ -46,21 +43,18 @@ def test_unparseable_vm_stat_output_gives_no_estimate():
 def test_detect_reports_this_machine():
     env = detect()
 
-    # Cross-checked against sources the detector does not use.
     assert env.memory_total == os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     assert env.python_version == platform.python_version()
     assert env.mlx_version == mx.__version__
     assert env.macos_version == platform.mac_ver()[0]
     assert env.architecture == platform.machine()
-    assert env.chip  # e.g. "Apple M-series"; never assumed, only reported
+    assert env.chip
     assert 0 < env.memory_available <= env.memory_total
     assert 0 < env.gpu_memory_limit <= env.memory_total
-    # Measured, not assumed: this process asked for exact float32 products.
     assert 0 <= env.float32_matmul_error < TOLERANCE
 
 
 def test_the_precision_reported_covers_the_grouped_product_of_the_expert_layers(monkeypatch):
-    # The report must not call a device accurate that the model would refuse.
     from opf_mlx import precision
 
     monkeypatch.setattr(precision, "float32_grouped_product_error", lambda: 8e-4)
@@ -72,7 +66,6 @@ def test_total_memory_is_the_installed_memory():
     assert total_memory() == os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
 
 
-# A made-up machine, so the report can be checked character for character.
 MACHINE = Environment(
     chip="Example M9",
     model_identifier="Mac99,1",
@@ -181,7 +174,6 @@ def test_the_device_limit_is_a_real_share_of_this_machines_memory():
 
 
 def test_a_probe_that_fails_gives_nothing_to_parse():
-    # A command that exits with an error may still have printed something.
     assert environment._run(["sh", "-c", "echo 42; exit 3"]) is None
     assert environment._run(["/nonexistent/opf-mlx-probe"]) is None
     assert environment._run(["sh", "-c", "echo 42"]) == "42\n"

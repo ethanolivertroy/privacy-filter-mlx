@@ -1,9 +1,3 @@
-"""The `opf-mlx` command line, on rigged checkpoints (see test_pipeline.py).
-
-Flags and output mirror the reference's `opf` command (`opf/__main__.py`), so
-most expectations here are the reference's formats written out literally.
-"""
-
 import io
 import json
 import os
@@ -52,7 +46,6 @@ RESULT = {
     ],
     "redacted_text": REDACTED,
 }
-# The reference's palette, one colour per category in label-space order.
 LEGEND = (
     "color legend: \x1b[38;5;39maccount_number\x1b[0m | \x1b[38;5;45mprivate_address\x1b[0m | "
     "\x1b[38;5;82mprivate_date\x1b[0m | \x1b[38;5;208mprivate_email\x1b[0m | \x1b[38;5;201mprivate_person\x1b[0m | "
@@ -74,9 +67,6 @@ def checkpoint(tmp_path_factory) -> str:
 @pytest.fixture(scope="module")
 def open_span_checkpoint(tmp_path_factory) -> str:
     return str(rigged_checkpoint(tmp_path_factory.mktemp("open-span"), OPEN_SPAN))
-
-
-# -------------------------------------------------------------------- redact
 
 
 def test_text_argument_prints_the_redacted_text(checkpoint, capsys):
@@ -155,7 +145,6 @@ def test_each_text_file_is_one_example(checkpoint, capsys, tmp_path):
 
     assert main(["--checkpoint", checkpoint, "-f", str(first), "--text-file", str(empty), "-f", str(second)]) == 0
 
-    # The first file is one text of two lines; the empty file is skipped.
     assert capsys.readouterr().out == "<PRIVATE_PERSON> was born.\n<PRIVATE_PERSON> left.\n\n<PRIVATE_PERSON> left.\n"
 
 
@@ -273,9 +262,6 @@ def test_redact_help_lists_the_flags(capsys):
         assert flag in out
 
 
-# ---------------------------------------------------------- process-level
-
-
 def run_module(*arguments: str, **options) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "opf_mlx", *arguments], capture_output=True, text=True, timeout=120, **options
@@ -312,7 +298,6 @@ def test_errors_exit_with_status_1(tmp_path):
 
 
 def test_a_terminal_gets_a_prompt_and_json(checkpoint):
-    # Standard input is a pseudo-terminal, as it is when a person runs the command.
     terminal, child_side = pty.openpty()
     try:
         process = subprocess.Popen(
@@ -334,16 +319,12 @@ def test_a_terminal_gets_a_prompt_and_json(checkpoint):
         os.close(terminal)
 
     assert process.returncode == 0
-    # A banner, a prompt per line read (the empty line is ignored), and JSON by default.
     assert out == "OPF redaction. Type '/exit' (or 'quit') to stop.\ntext> " + JSON_OUTPUT + "text> text> "
     session, summary = err.split("\n", 1)
     assert session == (
         f"session: checkpoint={checkpoint} device=gpu encoding=o200k_base n_ctx=64 output_mode=typed dtype=bfloat16"
     )
     assert re.fullmatch(SUMMARY, summary), summary
-
-
-# ----------------------------------------------------------------------- env
 
 
 def test_env_reports_the_machine_and_the_checkpoint(checkpoint, capsys, monkeypatch):
@@ -380,12 +361,8 @@ def test_env_as_json(checkpoint, capsys, monkeypatch):
     assert 0 <= report["float32_matmul_error"] < 1e-5
 
 
-# --------------------------------------------------------- download, verify
-
-
 @pytest.fixture
 def release(tmp_path, monkeypatch):
-    """A tiny checkpoint served the way the hub serves the real one, pinned as the released source."""
     root = tmp_path / "hub"
     files = rigged_checkpoint(root / "acme" / "tiny" / "resolve" / "rev1" / "original", PERSON_AND_DATE)
     write_calibration(files / "viterbi_calibration.json")
@@ -476,7 +453,6 @@ def test_verify_reports_tensors_that_do_not_fit_the_architecture(release, capsys
     assert main(["verify", "--checkpoint", str(target)]) == 1
 
     out = capsys.readouterr().out
-    # A third layer has 13 tensors, and the file has none of them.
     assert "  tensors                   checkpoint does not match the model (13 problem(s)):\n" in out
     assert "\n      missing tensor: block.2.attn.norm.scale\n" in out
 
@@ -484,7 +460,6 @@ def test_verify_reports_tensors_that_do_not_fit_the_architecture(release, capsys
 def test_intact_files_that_do_not_fit_together_fail_verification(release, capsys, monkeypatch, tmp_path):
     target = tmp_path / "installed"
     main(["download", "--checkpoint", str(target)])
-    # Pin a release whose config asks for three layers while its weights hold two.
     config = target / "config.json"
     config.write_text(json.dumps({**json.loads(config.read_text()), "num_hidden_layers": 3}))
     pinned = dict(checkpoint_module.RELEASED.files)

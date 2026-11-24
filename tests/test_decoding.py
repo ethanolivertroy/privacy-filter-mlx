@@ -1,5 +1,3 @@
-"""Constrained Viterbi decoding."""
-
 import itertools
 import json
 
@@ -40,8 +38,6 @@ def test_viterbi_rejects_a_sequence_that_starts_inside_a_span(space):
         {(0, O): -2.0, (0, I_PERSON): -0.1, (0, B_PERSON): -1.0, (0, S_PERSON): -3.0, (1, O): -0.1, (1, E_PERSON): -1.5},
     )
 
-    # Per-token argmax picks the ill-formed [I, O]. Valid paths score
-    # [O, O] = -2.1, [B, E] = -2.5, [S, O] = -3.1.
     assert argmax_decode(logp) == [I_PERSON, O]
     assert ViterbiDecoder(space).decode(logp) == [O, O]
 
@@ -49,8 +45,6 @@ def test_viterbi_rejects_a_sequence_that_starts_inside_a_span(space):
 def test_viterbi_does_not_leave_a_span_open_at_the_end(space):
     logp = logp_with(2, 33, {(0, B_PERSON): -0.1, (0, S_PERSON): -1.0, (0, O): -4.0, (1, I_PERSON): -0.1, (1, E_PERSON): -2.0, (1, O): -0.2})
 
-    # [B, I] would score -0.2 but ends inside a span. [B, E] = -2.1,
-    # [S, O] = -1.2, [O, O] = -4.2.
     assert ViterbiDecoder(space).decode(logp) == [S_PERSON, O]
 
 
@@ -66,12 +60,10 @@ def test_transition_bias_changes_the_chosen_path(space):
             (2, E_PERSON): -1.0,
         },
     )
-    # Unbiased: [B, E, O] = -0.8 beats [B, I, E] = -2.1.
     assert ViterbiDecoder(space).decode(logp) == [B_PERSON, E_PERSON, O]
 
     biased = ViterbiDecoder(space, {**dict.fromkeys(BIAS_KEYS, 0.0), "transition_bias_inside_to_continue": 2.0})
 
-    # With +2.0 on B->I: [B, I, E] = -0.1.
     assert biased.decode(logp) == [B_PERSON, I_PERSON, E_PERSON]
 
 
@@ -97,14 +89,13 @@ def test_wrong_shape_is_rejected(space):
 
 
 def _allowed(prev: str | None, nxt: str) -> bool:
-    """BIOES grammar written out by hand, independent of the decoder."""
     nxt_tag, _, nxt_cat = nxt.partition("-")
-    if prev is None:  # start of text
+    if prev is None:
         return nxt_tag in ("O", "B", "S")
     prev_tag, _, prev_cat = prev.partition("-")
     if prev_tag in ("O", "E", "S"):
         return nxt_tag in ("O", "B", "S")
-    return nxt_tag in ("I", "E") and nxt_cat == prev_cat  # prev is B or I
+    return nxt_tag in ("I", "E") and nxt_cat == prev_cat
 
 
 def test_viterbi_finds_the_best_valid_path_by_brute_force(released_config):

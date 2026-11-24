@@ -71,7 +71,7 @@ def rope_tables(config: ModelConfig, num_positions: int) -> tuple[mx.array, mx.a
                 config.rope_ntk_beta,
             )
             ramp = (mx.arange(half, dtype=mx.float32) - low) / (high - low)
-            keep = 1 - mx.clip(ramp, 0, 1)  # 1 where the original frequency is kept
+            keep = 1 - mx.clip(ramp, 0, 1)
             inv_freq = (1.0 / (config.rope_scaling_factor * freq)) * (1 - keep) + (1.0 / freq) * keep
             magnitude = 0.1 * math.log(config.rope_scaling_factor) + 1.0
         else:
@@ -132,41 +132,36 @@ class Attention(nn.Module):
     def __call__(self, x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
         B, T, _ = x.shape
         H, G, d = self.heads, self.kv_heads, self.head_dim
-        M = H // G  # query heads per key/value head
+        M = H // G
 
-        qkv = self.qkv(self.norm(x))  # [B, T, (H + 2G) d]
+        qkv = self.qkv(self.norm(x))
         q = qkv[..., : H * d].reshape(B, T, H, d)
         k = qkv[..., H * d : (H + G) * d].reshape(B, T, G, d)
         v = qkv[..., (H + G) * d :].reshape(B, T, G, d)
 
-        # The usual 1/sqrt(d) on the scores is split evenly between q and k.
         q = scale(rotate(q, cos, sin), self.qk_scale)
         k = scale(rotate(k, cos, sin), self.qk_scale)
 
-        # Query head g * M + m reads key/value head g.
-        q = q.reshape(B, T, G, M, d).transpose(0, 2, 3, 1, 4)  # [B, G, M, T, d]
-        k = k.transpose(0, 2, 1, 3)[:, :, None]  # [B, G, 1, T, d]
-        v = v.transpose(0, 2, 1, 3)[:, :, None]  # [B, G, 1, T, d]
+        q = q.reshape(B, T, G, M, d).transpose(0, 2, 3, 1, 4)
+        k = k.transpose(0, 2, 1, 3)[:, :, None]
+        v = v.transpose(0, 2, 1, 3)[:, :, None]
         sink = (self.sinks.astype(mx.float32) * LN2).reshape(1, G, M, 1, 1)  # stored in log2 units
 
-        # Dense attention over one block of queries at a time. The keys are
-        # every token some query of the block can see; the band mask removes
-        # the rest.
         attended = []
         for start in range(0, T, self.block_size):
             stop = min(start + self.block_size, T)
             first, last = max(0, start - self.left), min(T, stop + self.right)
 
-            scores = q[:, :, :, start:stop] @ k[:, :, :, first:last].swapaxes(-1, -2)  # [B, G, M, Tq, Tk]
+            scores = q[:, :, :, start:stop] @ k[:, :, :, first:last].swapaxes(-1, -2)
             scores = scores.astype(mx.float32)
-            offset = mx.arange(first, last)[None, :] - mx.arange(start, stop)[:, None]  # key minus query position
+            offset = mx.arange(first, last)[None, :] - mx.arange(start, stop)[:, None]
             in_band = mx.logical_and(offset >= -self.left, offset <= self.right)
             scores = mx.where(in_band, scores, -mx.inf)
             scores = mx.concatenate([scores, mx.broadcast_to(sink, (B, G, M, stop - start, 1))], axis=-1)
 
-            weights = mx.softmax(scores, axis=-1)[..., :-1]  # the sink's share is discarded
+            weights = mx.softmax(scores, axis=-1)[..., :-1]
             values = v[:, :, :, first:last]
-            attended.append(weights.astype(values.dtype) @ values)  # [B, G, M, Tq, d]
+            attended.append(weights.astype(values.dtype) @ values)
 
         attended = attended[0] if len(attended) == 1 else mx.concatenate(attended, axis=3)
         attended = attended.transpose(0, 3, 1, 2, 4).reshape(B, T, H * d)
@@ -198,7 +193,7 @@ class ExpertLinear(nn.Module):
         rows that share an expert in one step.
         """
         weight, bias = self.weight.astype(mx.float32), self.bias.astype(mx.float32)
-        product = mx.gather_mm(x[:, None, :], weight, rhs_indices=experts, sorted_indices=True)  # [n, 1, out]
+        product = mx.gather_mm(x[:, None, :], weight, rhs_indices=experts, sorted_indices=True)
         return product[:, 0, :] + bias[experts]
 
 
@@ -222,36 +217,28 @@ class MixtureOfExperts(nn.Module):
         self.chunk_size = chunk_size
 
     def __call__(self, x: mx.array) -> mx.array:
-        # The normalized input is rounded to the stream dtype before the
-        # float32 router and experts see it, as in the reference.
-        h = self.norm(x).reshape(-1, x.shape[-1]).astype(mx.float32)  # [N, D]
+        h = self.norm(x).reshape(-1, x.shape[-1]).astype(mx.float32)
 
-        router = h @ self.gate.weight.astype(mx.float32).T + self.gate.bias.astype(mx.float32)  # [N, E]
-        chosen = mx.argsort(-router, axis=-1)[:, : self.top_k]  # [N, k] expert ids, best first
-        mix = mx.softmax(mx.take_along_axis(router, chosen, axis=-1), axis=-1)  # [N, k]
+        router = h @ self.gate.weight.astype(mx.float32).T + self.gate.bias.astype(mx.float32)
+        chosen = mx.argsort(-router, axis=-1)[:, : self.top_k]
+        mix = mx.softmax(mx.take_along_axis(router, chosen, axis=-1), axis=-1)
 
-        # The experts run on `chunk_size` tokens at a time. Each step is
-        # finished before the next begins, so its working memory, which
-        # includes float32 copies of this layer's expert weights, is released.
         steps = []
         for start in range(0, h.shape[0], self.chunk_size):
             stop = start + self.chunk_size
-            outputs = self._experts(h[start:stop], chosen[start:stop])  # [n, k, D]
+            outputs = self._experts(h[start:stop], chosen[start:stop])
             steps.append((outputs * mix[start:stop, :, None]).sum(axis=1))
             mx.eval(steps[-1])
         y = steps[0] if len(steps) == 1 else mx.concatenate(steps, axis=0)
         return x + y.astype(x.dtype).reshape(x.shape)
 
     def _experts(self, h: mx.array, chosen: mx.array) -> mx.array:
-        """Outputs of each token's chosen experts. float32 [n, D], ids [n, k] -> float32 [n, k, D]."""
         n, k = chosen.shape
-        # Every (token, slot) pair is one row for one expert. Sorting the pairs
-        # by expert puts the rows of each expert next to each other.
-        expert_of_pair = chosen.reshape(-1)  # [n k]
+        expert_of_pair = chosen.reshape(-1)
         order = mx.argsort(expert_of_pair)
         experts = expert_of_pair[order]
         hidden = swiglu(self.swiglu(h[order // k], experts), self.limit, self.alpha)
-        outputs = self.out(hidden, experts)[mx.argsort(order)]  # back to (token, slot) order
+        outputs = self.out(hidden, experts)[mx.argsort(order)]
         return outputs.reshape(n, k, -1)
 
 

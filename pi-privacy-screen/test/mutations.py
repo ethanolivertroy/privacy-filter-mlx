@@ -1,15 +1,3 @@
-"""Mutation check for the privacy screen: do the unit tests notice a defect?
-
-    python3 test/mutations.py [part of a name, or a file name such as screen.ts]
-
-Each entry below is one deliberate defect: a piece of a source file and what to put in its place. For each
-one the package is copied to a temporary directory, the defect is made in the copy, and the unit tests that
-cover that file are run. They have to fail. A defect that the tests do not notice ("survived") is a behaviour
-nothing checks; one whose text is no longer found ("could not be applied") has to be brought up to date with
-the source. The files of the package itself are never changed.
-
-Exit status 0 only if every defect was noticed. MUT_VERBOSE=1 also lists, for each one, a test that caught it.
-"""
 import os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
@@ -34,9 +22,8 @@ M = []
 def m(name, file, old, new):
     M.append((name, file, old, new))
 
-# ---------------------------------------------------------------- screen.ts
 m("one round only", "screen.ts", "const MAX_ROUNDS = 8;", "const MAX_ROUNDS = 1;")
-m("short values spread", "screen.ts", "const SPREAD_FROM = 3;", "const SPREAD_FROM = 1;")
+m("short values spread", "screen.ts", "const MIN_GLOBAL_REPLACE_LENGTH = 3;", "const MIN_GLOBAL_REPLACE_LENGTH = 1;")
 m("system prompt goes to the detector", "screen.ts", 'detect: origin !== "system" };', "detect: true };")
 m("kept foreign text is not detected", "screen.ts", 'mode: "kept", detect: foreign };', 'mode: "kept", detect: false };')
 m("foreign text is trusted like the provider's", "screen.ts",
@@ -55,13 +42,13 @@ m("keys only where they stand alone", "screen.ts", "if (!free(at, end) || !(know
   "if (!free(at, end) || !standsAlone(text, at, end)) continue;")
 m("a fragment is left sticking out", "screen.ts", "if (holders.size === 0 || covered) continue;", "continue;")
 m("a revealed detection is masked", "screen.ts", "			if (entry.revealed) continue;\n", "")
-m("revealed values stay known", "screen.ts", "if (!entry.revealed && entry.value.length >= SPREAD_FROM)", "if (entry.value.length >= SPREAD_FROM)")
+m("revealed values stay known", "screen.ts", "if (!entry.revealed && entry.value.length >= MIN_GLOBAL_REPLACE_LENGTH)", "if (entry.value.length >= MIN_GLOBAL_REPLACE_LENGTH)")
 m("a revealed reference stays a placeholder", "screen.ts", "const shown = (entry: Entry) => (entry.revealed ? entry.value : entry.token);", "const shown = (entry: Entry) => entry.token;")
 m("unchanged text is never remembered", "screen.ts", "if (real === masked && !tokenPattern().test(masked)) return;", "if (real === masked) return;")
 m("remember does not report", "screen.ts", "		this.onRemember?.(key, kept);\n", "")
 m("kept checks are shared between providers", "screen.ts", '`${foreign ? "kept+" : "kept:"}${digest("provider", written)}`', '`kept:${digest("provider", written)}`')
 m("unmask does nothing", "screen.ts", "return text.replace(tokenPattern(), (token) => this.vault.lookup(token)?.value ?? token);", "return text;")
-m("the last look misses JSON forms", "screen.ts", 'if (mode === "payload") {\n				const inJson', 'if (false) {\n				const inJson')
+m("the last look misses JSON forms", "screen.ts", 'if (mode === "payload") {\n\t\t\t\t\tconst inJson', 'if (false) {\n\t\t\t\t\tconst inJson')
 m("the last look counts its own placeholders", "screen.ts", "return { text: out + text.slice(at), hits: made.length - kept };", "return { text: out + text.slice(at), hits: made.length };")
 m("a failed text is sent unchecked", "screen.ts", "const found = answer instanceof Error ? answer : search(wait.way.text, answer);",
   "const found = answer instanceof Error ? search(wait.way.text, []) : search(wait.way.text, answer);")
@@ -70,7 +57,7 @@ m("down is not reported as down", "screen.ts", "fail(asError(error), true, asked
 m("a wrong count of answers is used", "screen.ts", '				if (answers.length !== asked.length) throw new Error("the detector answered for a different number of texts");\n', "")
 m("checks are forgotten at once", "screen.ts", "if (check.pass < this.pass - 1) this.checked.delete(key);", "if (check.pass <= this.pass) this.checked.delete(key);")
 m("checks are never forgotten", "screen.ts", "if (check.pass < this.pass - 1) this.checked.delete(key);", "")
-m("seeds do not bump the epoch", "screen.ts", "			if (value.length >= SPREAD_FROM) this.seeds.add(value);\n		}\n		this.epoch++;", "			if (value.length >= SPREAD_FROM) this.seeds.add(value);\n		}")
+m("seeds do not bump the epoch", "screen.ts", "			if (value.length >= MIN_GLOBAL_REPLACE_LENGTH) this.seeds.add(value);\n		}\n		this.epoch++;", "			if (value.length >= MIN_GLOBAL_REPLACE_LENGTH) this.seeds.add(value);\n		}")
 m("reveal does not bump the epoch", "screen.ts", "		if (!this.vault.setRevealed(token, revealed)) return false;\n		this.epoch++;", "		if (!this.vault.setRevealed(token, revealed)) return false;")
 m("every value is key-like", "screen.ts", "return value.length >= 12 && /[A-Za-z]/.test(value) && /[0-9]/.test(value) && !/\\s/.test(value);", "return true;")
 m("overlaps are not merged", "screen.ts", "if (last && range.start < last.end) last.end = Math.max(last.end, range.end);", "if (false) last.end = Math.max(last.end, range.end);")
@@ -81,22 +68,21 @@ m("patterns are skipped for the system prompt", "screen.ts", 'const found = way.
 m("seeds are not replaced", "screen.ts", "			if (!this.vault.find(value)) list.push({ value, anywhere: keyLike(value) });\n", "")
 m("a detection touching a reference is kept", "screen.ts", "const detected = merged([...found, ...literals]).filter((range) => free(range.start, range.end));", "const detected = merged([...found, ...literals]);")
 
-# -------------------------------------------------------------- messages.ts
 m("every reply is trusted", "messages.ts", 'const origin: Origin = typeof message.provider === "string" && message.provider === target.provider ? "provider" : "foreign";', 'const origin: Origin = "provider";')
 m("a reply without a provider is trusted", "messages.ts", 'typeof message.provider === "string" && message.provider === target.provider ? "provider" : "foreign";', 'message.provider === target.provider ? "provider" : "foreign";')
 m("summaries are trusted", "messages.ts", 'slot(copy.summary, "foreign", (text) => (copy.summary = text));', 'slot(copy.summary, "provider", (text) => (copy.summary = text));')
 m("excluded shell runs are screened", "messages.ts", "				if (message.excludeFromContext) break;\n", "")
 m("the system prompt is skipped", "messages.ts", '				content(copy, "content", "system");\n', "")
 m("user text is not screened", "messages.ts", '			case "user":\n			case "toolResult":', '			case "toolResult":')
-m("tool results are not screened", "messages.ts", '			case "user":\n			case "toolResult":\n			case "custom": // from an extension', '			case "user":\n			case "custom": // from an extension')
+m("tool results are not screened", "messages.ts", '			case "user":\n			case "toolResult":\n			case "custom":', '			case "user":\n			case "custom":')
 m("a typed command is not screened", "messages.ts", '				slot(copy.command, "input", (text) => (copy.command = text));\n', "")
 m("shell output is not screened", "messages.ts", '				slot(copy.output, "input", (text) => (copy.output = text));\n', "")
 m("sections are skipped", "messages.ts", 'for (const name of Object.keys(sections)) slot(sections[name], "system", (text) => (sections[name] = text));', "")
 m("unchecked text is sent as it is", "messages.ts", "put(texts[index] ?? WITHHELD);", "if (texts[index] !== undefined) put(texts[index]!);")
 m("tool call arguments are not screened", "messages.ts", "eachString(call.arguments, (text, put) => slot(text, origin, put));", "")
 m("the transcript changes the stored message", "messages.ts", "const call = { ...block, arguments: structuredClone(block.arguments) as Holder };", "const call = { ...block, arguments: block.arguments as Holder };")
-m("a refused command is changed anyway", "messages.ts", "	if (refusal !== undefined) return refusal;\n	for (const change of changes) {", "	for (const change of changes) {")
-m("a refusal is not reported", "messages.ts", "	if (refusal !== undefined) return refusal;\n	for (const change of changes) {", "	if (refusal !== undefined) return undefined;\n	for (const change of changes) {")
+m("a refused command is changed anyway", "messages.ts", "	if (refusal !== undefined) return { ok: false, refusal };\n	for (const change of changes) {", "	for (const change of changes) {")
+m("a refusal is not reported", "messages.ts", "	if (refusal !== undefined) return { ok: false, refusal };\n	for (const change of changes) {", "	if (refusal !== undefined) return { ok: true };\n	for (const change of changes) {")
 m("shell commands get values unquoted", "messages.ts", "if (shell.includes(path[0]!)) {", "if (false) {")
 m("values are put in twice", "messages.ts", "		if (options.settled?.get(where) === text) return;\n", "")
 m("code tools get values", "messages.ts", "if (!rules.code.includes(name)) {", "if (true) {")
@@ -108,7 +94,6 @@ m("the last look enters thinking", "messages.ts", 'if (!isRecord(node) || (typeo
 m("the last look enters images", "messages.ts", '			if (node.startsWith("data:")) return node;\n', "")
 m("withheld texts are not counted", "messages.ts", "				if (texts[index] === undefined) withheld++;\n", "")
 
-# ----------------------------------------------------------------- index.ts
 m("local models are screened", "index.ts", "const isLocal = (s: Session, ctx: Ctx) => !s.config.screenLocalModels && isLocalModel(ctx.model, s.config);", "const isLocal = (s: Session, ctx: Ctx) => false && isLocalModel(ctx.model, s.config);")
 m("screenLocalModels is ignored", "index.ts", "const isLocal = (s: Session, ctx: Ctx) => !s.config.screenLocalModels && isLocalModel(ctx.model, s.config);", "const isLocal = (s: Session, ctx: Ctx) => isLocalModel(ctx.model, s.config);")
 m("off still screens", "index.ts", '(s.mode === "off" || isLocal(s, ctx) ? undefined : s.mode);', "(isLocal(s, ctx) ? undefined : s.mode === \"off\" ? \"mask\" : s.mode);")
@@ -116,13 +101,13 @@ m("the door stays open", "index.ts", '			return { action: "handled" };', '			ret
 m("the text is not given back", "index.ts", '				if (typeof event.text === "string") ctx.ui.setEditorText?.(event.text);\n', "")
 m("no abort when the detector is down", "index.ts", "				say(ctx, `${problem.error.message}. The request was stopped, and what could not be checked was not sent. /privacy retry tries the detector again; /privacy off sends without screening.`, \"error\");\n				ctx.abort();", "				say(ctx, `${problem.error.message}. The request was stopped, and what could not be checked was not sent. /privacy retry tries the detector again; /privacy off sends without screening.`, \"error\");")
 m("an exception sends the request", "index.ts", "			return withholdAll(ctx, error);", "			return undefined;")
-m("withholdAll does not abort", "index.ts", "		try {\n			ctx.abort();\n		} catch {\n			// the messages below hold nothing either way\n		}", "")
+m("withholdAll does not abort", "index.ts", "		try {\n			ctx.abort();\n		} catch {\n		}\n		const timestamp", "		const timestamp")
 m("report mode masks", "index.ts", "				refresh(ctx, s);\n				return undefined;\n			}\n\n			const built", "				refresh(ctx, s);\n			}\n\n			const built")
 m("the last look is skipped", "index.ts", "			if (swept.hits === 0) return undefined;", "			if (swept.hits >= 0) return undefined;")
-m("code tools are unmasked at the hook", "index.ts", "		if (s.config.codeTools.includes(event.toolName)) return undefined; // the calls such code makes come here themselves\n", "")
-m("a refusal does not block", "index.ts", "return refusal === undefined ? undefined : { block: true, reason: refusal };", "return undefined;")
-m("settled is ignored at the hook", "index.ts", "const settled = s.settled.get(event.toolCallId);", "const settled = undefined;")
-m("settled is not recorded", "index.ts", "			for (const [id, record] of unmasked.settled) s.settled.set(id, record);\n", "")
+m("code tools are unmasked at the hook", "index.ts", "		if (s.config.codeTools.includes(event.toolName)) return undefined;\n", "")
+m("a refusal does not block", "index.ts", "return result.ok ? undefined : { block: true, reason: result.refusal };", "return undefined;")
+m("settled is ignored at the hook", "index.ts", "const settled = s.unmaskedToolCalls.get(event.toolCallId);", "const settled = undefined;")
+m("settled is not recorded", "index.ts", "			for (const [id, record] of unmasked.settled) s.unmaskedToolCalls.set(id, record);\n", "")
 m("summary with a problem is sent", "index.ts", "			if (masked.problem) throw masked.problem.error;\n			if (masked.texts.includes(undefined)) throw new Error(\"a text could not be checked\");\n", "")
 m("summary prompt is not masked", "index.ts", "			if (prompt.length > 0) request.systemPrompt = masked.texts.at(-1);\n", "")
 m("failed compaction falls back to pi's own", "index.ts", "			if (!event.signal?.aborted) say(ctx, `compaction was cancelled, because its summary request could not be screened or made (${reasonOf(error)}).`, \"error\");\n			return { cancel: true };", "			return undefined;")
@@ -136,12 +121,12 @@ m("values are not saved", "index.ts", '		vault.onAllocate = (entry) => save({ ki
 m("remembered text is not saved", "index.ts", '		screen.onRemember = (key, masked) => save({ kind: "remember", key, masked });\n', "")
 m("reveals are not saved", "index.ts", '					save({ kind: "reveal", token, revealed: name === "reveal" });\n', "")
 m("no head start", "index.ts", '		warm(ctx, s);\n		headStart(ctx, s);\n', '		warm(ctx, s);\n')
-m("a request does not wait for the head start", "index.ts", '			await s.ahead; // most of these texts are being checked already: that is waited for, not asked for again\n', '')
+m("a request does not wait for the head start", "index.ts", '			await s.prescanPromise;\n', '')
 m("a head start for models that are not screened", "index.ts", '		if (!screening(s, ctx)) return;\n		warm(ctx, s);', '		warm(ctx, s);')
-m("an ended session writes the status line", "index.ts", '		if (s !== session) return; // that session has ended; the line belongs to the next one\n', '')
-m("a head start that cannot be made stops the session's start", "index.ts", '		} catch {\n			// then the first request does all of it\n		}', '		} finally {\n			// nothing\n		}')
-m("the head start does not bring the count up to date", "index.ts", 's.ahead = s.screen.mask(plan.items).then(() => refresh(ctx, s));', 's.ahead = s.screen.mask(plan.items);')
-m("the head start is made for another provider", "index.ts", 'const plan = transcript(messages as Message[], { provider: ctx.model?.provider });\n			s.ahead', 'const plan = transcript(messages as Message[]);\n			s.ahead')
+m("an ended session writes the status line", "index.ts", '		if (s !== session) return;\n', '')
+m("a head start that cannot be made stops the session's start", "index.ts", '			s.prescanPromise = s.screen.mask(plan.items).then(() => refresh(ctx, s));\n		} catch {\n		}', '			s.prescanPromise = s.screen.mask(plan.items).then(() => refresh(ctx, s));\n		} finally {\n		}')
+m("the head start does not bring the count up to date", "index.ts", 's.prescanPromise = s.screen.mask(plan.items).then(() => refresh(ctx, s));', 's.prescanPromise = s.screen.mask(plan.items);')
+m("the head start is made for another provider", "index.ts", 'const plan = transcript(messages as Message[], { provider: ctx.model?.provider });\n			s.prescanPromise', 'const plan = transcript(messages as Message[]);\n			s.prescanPromise')
 m("reveal does not take the value itself", "index.ts", '?.token ?? s.screen.vault.find(what)?.token;', '?.token;')
 m("reveal does not take a placeholder", "index.ts", 'const token = s.screen.vault.lookup(`<${bare}>`)?.token ?? s.screen.vault.find(what)?.token;', 'const token = s.screen.vault.find(what)?.token;')
 m("conceal reveals", "index.ts", '					s.screen.reveal(token, name === "reveal");\n					save(', '					s.screen.reveal(token, true);\n					save(')
@@ -171,7 +156,6 @@ m("env files are read once", "index.ts", "			const s = ready(ctx);\n			await lea
 m("the branch summary ignores userWantsSummary", "index.ts", "!preparation?.userWantsSummary || ", "")
 m("the provider is not told to transcript", "index.ts", "transcript(event.messages, { provider: ctx.model?.provider })", "transcript(event.messages)")
 
-# ---------------------------------------------------------------- config.ts
 m("127 anywhere is local", "config.ts", "/^127(\\.\\d{1,3}){3}$/.test(host)", "/127(\\.\\d{1,3}){3}/.test(host)")
 m("localhost prefix is local", "config.ts", 'host === "localhost" ||', 'host.startsWith("localhost") ||')
 m("an unknown mode is taken", "config.ts", "const isMode = (value: unknown): value is Mode => MODES.includes(value as Mode);", "const isMode = (value: unknown): value is Mode => typeof value === \"string\";")
@@ -180,7 +164,6 @@ m("unknown settings are silent", "config.ts", "(settings[key] ?? (() => problems
 m("a listed provider is not local", "config.ts", "	if (model.provider !== undefined && config.localProviders.includes(model.provider)) return true;\n", "")
 m("the config path ignores the agent dir", "config.ts", 'const agentDir = env.PI_CODING_AGENT_DIR ? expand(env.PI_CODING_AGENT_DIR, home) : join(home, ".pi", "agent");', 'const agentDir = join(home, ".pi", "agent");')
 
-# -------------------------------------------------------------- detector.ts
 m("spans outside the text are used", "detector.ts", "start < 0 || end <= start || end > texts[index]!.length) return unusable();", "start < 0 || end <= start) return unusable();")
 m("a wrong number of results is used", "detector.ts", "|| body.results.length !== texts.length) return texts.map(unusable);", ") return texts.map(unusable);")
 m("too large texts are sent", "detector.ts", "			if (size > maxTextBytes) {", "			if (false) {")
@@ -195,7 +178,6 @@ m("batches ignore the byte limit", "detector.ts", "if (batch.length >= batchText
 m("offsets are code points", "detector.ts", '{ texts, offsets: "utf16" }', '{ texts, offsets: "codepoint" }')
 m("a transport failure is a per-text error", "detector.ts", "			throw new Error(`the detector at ${this.options.socket} did not answer (${(error as Error).message})`);", "			return texts.map(() => new Error(\"x\"));")
 
-# ---------------------------------------------------------------- dotenv.ts
 m("example files are read", "dotenv.ts", "return names.filter((name) => !EXAMPLE_FILE.test(name) && usable.some", "return names.filter((name) => usable.some")
 m("public names are taken", "dotenv.ts", "if (!SECRET_NAME.test(name) || PUBLIC_NAME.test(name)) continue;", "if (!SECRET_NAME.test(name)) continue;")
 m("every name is taken", "dotenv.ts", "if (!SECRET_NAME.test(name) || PUBLIC_NAME.test(name)) continue;", "if (PUBLIC_NAME.test(name)) continue;")
@@ -207,17 +189,15 @@ m("escapes are not read", "dotenv.ts", "		return read === written ? [written] : 
 m("comments stay on values", "dotenv.ts", "	return [text.replace(/\\s+#.*$/, \"\")];", "	return [text];")
 m("a star matches a leading dot", "dotenv.ts", '	if (pattern.startsWith("*") && name.startsWith(".")) return false;\n', "")
 
-# -------------------------------------------------------------- patterns.ts
 m("assigned values need not be plausible", "patterns.ts", "		check: plausibleSecret,\n", "")
 m("a bare value ends in a backslash", "patterns.ts", "[^\\\\s\"'\\`,;]{6}[^\\\\s\"'\\`,;]*(?<!\\\\\\\\)))`,", "[^\\\\s\"'\\`,;]{6}[^\\\\s\"'\\`,;]*))`,")
-m("a key block is its first line", "patterns.ts", "				if (!last) break; // nothing ends after this point, so nothing does after a later start either\n				end = past = last.index + last[0].length;", "				if (!last) break;")
+m("a key block is its first line", "patterns.ts", "				if (!last) break;\n				end = past = last.index + last[0].length;", "				if (!last) break;")
 m("sk- needs no digit", "patterns.ts", "check: (value) => /[0-9]/.test(value) && /[A-Z]/.test(value) },", "check: (value) => /[A-Z]/.test(value) },")
 m("the URL password may be a template", "patterns.ts", "groups: [1], check: (value) => !/[${}<>%*]/.test(value) },", "groups: [1] },")
 m("overlapping finds are all returned", "patterns.ts", "if (found.length === 0 || candidate.start >= found[found.length - 1]!.end) found.push(candidate);", "found.push(candidate);")
-m("a plausible secret needs no digit", "patterns.ts", "	return /[0-9]/.test(value);\n}", "	return true;\n}")
-m("paths are plausible secrets", "patterns.ts", "	if (/^(?:\\/|\\.\\.?\\/|~)/.test(value)) return false; // a path\n", "")
+m("a plausible secret needs no digit", "patterns.ts", "	return HAS_DIGIT.test(value);\n}", "	return true;\n}")
+m("paths are plausible secrets", "patterns.ts", "	if (FILE_PATH.test(value)) return false;\n", "")
 
-# ----------------------------------------------------------------- spans.ts
 m("a trailing backslash stays", "spans.ts", '(trailing.test(text[end - 1]!) || text[end - 1] === "\\\\")) end--;', "trailing.test(text[end - 1]!)) end--;")
 m("a leading escape stays", "spans.ts", '		else if (start + 1 < end && text[start] === "\\\\" && leading.test(text[start + 1]!)) start += 2;\n', "")
 m("spans run across lines", "spans.ts", '		if (index === end || text[index] === "\\n" || text[index] === "\\r") {', "		if (index === end) {")
@@ -227,7 +207,6 @@ m("the assigned name stays in a secret", "spans.ts", "			if (name) [start, end] 
 m("short secrets are kept", "spans.ts", "return end - start >= 6 ? [start, end] : undefined;", "return end > start ? [start, end] : undefined;")
 m("the address pattern is not applied", "spans.ts", "return email ? [start + email.index, start + email.index + email[0].length] : undefined;", "return [start, end];")
 
-# ----------------------------------------------------------------- shell.ts
 m("single quotes in a value are not escaped", "shell.ts", "const inSingle = (value: string) => value.replaceAll(\"'\", `'\\\\''`);", "const inSingle = (value: string) => value;")
 m("braces are not checked", "shell.ts", "		if (!affected) return;\n", "		return;\n")
 m("NUL is accepted", "shell.ts", '		if (spot.value.includes("\\0")) refuse(spot, "its value contains a NUL character");\n', "")
@@ -239,7 +218,6 @@ m("comments in a substitution are followed", "shell.ts", '		if (insideSubstituti
 m("a here-document in a substitution is followed", "shell.ts", """				if (nested && /['"()`\\\\]/.test(written)) return lose("a here-document inside $( ) with quotes or parentheses in its text");\n""", "")
 m("a dash value is accepted", "shell.ts", '			refuse(spot, "its value starts with a dash and would be read as an option here; put -- before it, or attach it to its option as in --name=…");\n', "")
 
-# ----------------------------------------------------------------- vault.ts
 m("a value gets a new placeholder each time", "vault.ts", "		const existing = this.byValue.get(value);\n		if (existing) return existing;\n", "")
 m("a contradicting pair is loaded", "vault.ts", "			if (byToken !== byValue) return false;\n", "")
 m("a malformed token is loaded", "vault.ts", '		if (!match || typeof value !== "string" || value === "") return false;', '		if (!match) return true;')

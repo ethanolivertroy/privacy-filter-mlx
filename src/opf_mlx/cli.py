@@ -59,11 +59,9 @@ BANNER = "OPF redaction. Type '/exit' (or 'quit') to stop."
 PROMPT = "text> "
 EXIT_COMMANDS = frozenset({"/exit", "exit", "quit", ":q"})
 
-# The reference's ANSI 256-colour palette for categories.
 PALETTE = (39, 45, 82, 208, 201, 51, 99, 220, 118, 214)
 RESET = "\x1b[0m"
 
-# What a user can cause: reported as one line and exit status 1. Anything else is a bug and keeps its traceback.
 USER_ERRORS = (checkpoint.CheckpointError, PrecisionError, env.InsufficientMemoryError, OSError, ValueError)
 
 
@@ -88,9 +86,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _show_warning(message, category, filename, lineno, file=None, line=None) -> None:
     print(f"warning: {message}", file=sys.stderr)
-
-
-# -------------------------------------------------------------------- redact
 
 
 def parse_redact_arguments(argv: Sequence[str]) -> argparse.Namespace:
@@ -143,7 +138,6 @@ def parse_redact_arguments(argv: Sequence[str]) -> argparse.Namespace:
 
 
 def _add_runtime_arguments(runtime: argparse._ArgumentGroup) -> None:
-    """The flags that choose and place the model; shared by `redact` and `serve`."""
     runtime.add_argument(
         "--checkpoint",
         default=None,
@@ -172,7 +166,6 @@ def _add_runtime_arguments(runtime: argparse._ArgumentGroup) -> None:
 
 
 def _add_decode_arguments(decode: argparse._ArgumentGroup) -> None:
-    """The flags that turn logits into spans; shared by `redact` and `serve`."""
     decode.add_argument(
         "--decode-mode",
         choices=DECODE_MODES,
@@ -265,7 +258,6 @@ def _redact(argv: Sequence[str]) -> int:
 
 
 def _inputs(arguments: argparse.Namespace) -> Iterator[str]:
-    """The texts to redact: the argument, else files, else piped lines, else the prompt."""
     if arguments.text:
         yield arguments.text
     elif arguments.text_file:
@@ -324,7 +316,7 @@ def colour_legend(colours: Mapping[str, int]) -> str:
 def colour_coded_text(text: str, spans: Sequence[DetectedSpan], colours: Mapping[str, int]) -> str:
     pieces: list[str] = []
     cursor = 0
-    for span in spans:  # sorted and non-overlapping, as the pipeline returns them
+    for span in spans:
         pieces.append(text[cursor : span.start])
         pieces.append(_paint(text[span.start : span.end], span.label, colours))
         cursor = span.end
@@ -334,9 +326,6 @@ def colour_coded_text(text: str, spans: Sequence[DetectedSpan], colours: Mapping
 
 def _paint(text: str, label: str, colours: Mapping[str, int]) -> str:
     return f"\x1b[38;5;{colours[label]}m{text}{RESET}" if label in colours else text
-
-
-# --------------------------------------------------------------------- serve
 
 
 def parse_serve_arguments(argv: Sequence[str]) -> argparse.Namespace:
@@ -372,7 +361,7 @@ def parse_serve_arguments(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--idle-exit must be positive")
     if arguments.max_request_bytes <= 0:
         parser.error("--max-request-bytes must be positive")
-    arguments.output_mode = "typed"  # a caller that masks needs to know what each span is
+    arguments.output_mode = "typed"
     return arguments
 
 
@@ -381,10 +370,9 @@ def detector_for(privacy_filter: PrivacyFilter) -> serve.Detector:
 
     def detect(text: str) -> serve.Detection:
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", PrivacyFilterWarning)  # it travels in the result instead
+            warnings.simplefilter("ignore", PrivacyFilterWarning)
             result = privacy_filter.redact(text)
         if result.summary["decoded_mismatch"]:
-            # Spans would index the decoded text, not the text the caller holds.
             raise ValueError("the text does not survive tokenization")
         return serve.Detection([(span.start, span.end, span.label) for span in result.detected_spans], result.warning)
 
@@ -393,7 +381,6 @@ def detector_for(privacy_filter: PrivacyFilter) -> serve.Detector:
 
 def _serve(argv: Sequence[str]) -> int:
     arguments = parse_serve_arguments(argv)
-    # Claim the socket before loading the model: a second server gives up at once.
     claim = None if arguments.port is not None else serve.SocketClaim(arguments.socket or serve.default_socket_path())
     try:
         privacy_filter = build_filter(arguments)
@@ -419,12 +406,9 @@ def _serve(argv: Sequence[str]) -> int:
     with server:
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: server.stop())
-        print(f"listening on {server.address}", flush=True)  # the model is loaded: listening means ready
+        print(f"listening on {server.address}", flush=True)
         server.serve()
     return 0
-
-
-# ---------------------------------------------------- env, download, verify
 
 
 def _env(argv: Sequence[str]) -> int:

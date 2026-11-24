@@ -54,7 +54,6 @@ DECODE_MODES: tuple[str, ...] = ("viterbi", "argmax")
 DEVICES = {"gpu": mx.gpu, "cpu": mx.cpu}
 DTYPES: tuple[str, ...] = ("bfloat16", "float32")
 
-# The reference's context window when it runs on a CPU (`_resolve_n_ctx`).
 CPU_N_CTX = 4096
 
 MISMATCH_WARNING = (
@@ -187,7 +186,6 @@ class PrivacyFilter:
             warnings.warn(note, PrivacyFilterWarning, stacklevel=2)
 
         with mx.stream(DEVICES[device]):
-            # The expert router and expert MLPs run in float32 whatever `dtype` is.
             precision.require_full_precision()
             self.model = Transformer(self.config)
             self.model.load_weights(list(load_weights(self.checkpoint, self.config, dtype=dtype).items()), strict=True)
@@ -208,8 +206,6 @@ class PrivacyFilter:
         scores, notes = self._score(token_ids)
         labels = self._decoder.decode(scores) if self._decoder is not None else argmax_decode(scores)
 
-        # Spans index the text the tokens decode to. That is the input, unless
-        # the input held something the tokenizer could not represent.
         decoded, char_starts, char_ends = self.tokenizer.decode_with_offsets(token_ids)
         decoded_mismatch = decoded != text
         source = decoded if decoded_mismatch else text
@@ -248,11 +244,10 @@ class PrivacyFilter:
         return np.concatenate(parts, axis=0), self._window_notes(len(token_ids), len(windows))
 
     def _window_notes(self, tokens: int, windows: int) -> list[str]:
-        """Say so when splitting the input may have changed what the model saw."""
         if windows == 1:
             return []
         if self.window_policy == "halo" and self.halo >= max(self.config.receptive_field):
-            return []  # every kept token saw all the context it can use
+            return []
         if self.window_policy == "halo":
             how = f"{windows} windows with a halo of {self.halo} tokens, less than the model's reach"
         else:

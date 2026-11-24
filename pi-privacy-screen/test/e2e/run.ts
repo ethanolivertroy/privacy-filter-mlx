@@ -1,19 +1,3 @@
-/**
- * End to end: the real `pi`, the real detector, and a pretend provider.
- *
- *   node test/e2e/run.ts [scenario ...]
- *
- * Pi runs in RPC mode with its own home and agent directory, so no setting, session or account of
- * the user is touched, and the only "model" is a small HTTP server on this machine that records
- * every request it is sent and answers from a script. The detector is the real `opf-mlx serve`
- * with the real checkpoint (read only), on a socket in a temporary directory.
- *
- * Each check is about what left the machine (the recorded request bodies), what was stored and
- * what the tools did. Things that are only observed, not required, are printed as "note".
- *
- * Needs: `pi` on the PATH, the project's .venv, and the checkpoint (OPF_CHECKPOINT, or ~/.opf/privacy_filter).
- */
-
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -31,10 +15,8 @@ const serveCommand = [opf, "serve", "--checkpoint", checkpoint, "--no-download"]
 
 const EMAIL = "lena.fischer@example.com";
 const EMAIL_2 = "omar.haddad@example.com";
-const TOKEN = ["ghp_", "x7KqLm29ZpQrStUvWxYz", "0123456789AbCdEf"].join(""); // made up, in GitHub's format
+const TOKEN = ["ghp_", "x7KqLm29ZpQrStUvWxYz", "0123456789AbCdEf"].join("");
 const HOSTILE = "it's; touch PWNED; echo '";
-
-// ------------------------------------------------------------------ results
 
 const results: { scenario: string; ok: boolean; name: string; detail?: string }[] = [];
 const notes: string[] = [];
@@ -52,12 +34,9 @@ const short = (value: unknown, length = 400) => {
 	return text.length > length ? `${text.slice(0, length)}…` : text;
 };
 
-// ---------------------------------------------------------- pretend provider
-
 interface Reply {
 	text?: string;
 	toolCalls?: { name: string; arguments: object }[];
-	/** Milliseconds to hold the stream open after the text, so that a reply can be looked at while it is still coming in. */
 	pause?: number;
 }
 type Script = (body: any, index: number) => Reply;
@@ -95,7 +74,6 @@ async function startProvider() {
 		const delta = (content: object, finish: string | null = null) => event([{ index: 0, delta: content, finish_reason: finish }]);
 		response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
 		response.write(delta({ role: "assistant", content: "" }));
-		// In pieces of five characters, so that a placeholder arrives split over several events.
 		for (const piece of (reply.text ?? "").match(/[\s\S]{1,5}/g) ?? []) response.write(delta({ content: piece }));
 		if (reply.pause) await new Promise((resolve) => setTimeout(resolve, reply.pause));
 		for (const call of toolCalls) response.write(delta({ tool_calls: [call] }));
@@ -116,16 +94,11 @@ async function startProvider() {
 }
 type Provider = Awaited<ReturnType<typeof startProvider>>;
 
-/** Everything a request carries, as one string to search in. */
 const sentIn = (provider: Provider, from = 0) => provider.requests.slice(from).map((request) => request.raw).join("\n");
 const toolMessages = (body: any) => (body.messages as any[]).filter((message) => message.role === "tool");
 const textOf = (message: any): string => (typeof message?.content === "string" ? message.content : (message?.content ?? []).map((part: any) => part.text ?? "").join(""));
 const isSummaryRequest = (body: any) => !body.tools?.length;
 
-/**
- * A listener in front of the detector that passes every request on and notes the texts it was asked about. It is
- * the only way to see from outside what the screen asks the detector, and when: before a request is made, or for it.
- */
 async function startTap(target: string, name: string) {
 	const asked: string[][] = [];
 	const path = join(root, `${name}.sock`);
@@ -148,8 +121,6 @@ async function startTap(target: string, name: string) {
 		close: () => new Promise<void>((resolve) => (server.closeAllConnections(), server.close(() => resolve()))),
 	};
 }
-
-// ------------------------------------------------------------------------ pi
 
 class Pi {
 	readonly events: any[] = [];
@@ -188,7 +159,6 @@ class Pi {
 		this.child.on("exit", () => (this.exited = true));
 	}
 
-	/** The first record from `from` on that passes `test`; rejects after `seconds`. */
 	waitFor(test: (record: any) => boolean, seconds: number, from = 0, what = "a record"): Promise<any> {
 		const seen = this.events.slice(from).find(test);
 		if (seen) return Promise.resolve(seen);
@@ -205,14 +175,17 @@ class Pi {
 		return this.waitFor((record) => record.type === "response" && record.id === id, seconds, from, `the response to ${command.type}`);
 	}
 
-	/** Send a prompt and wait until Pi has nothing more to do with it. Returns the records it produced. */
 	async prompt(message: string, seconds = 120): Promise<{ disposition: string | undefined; records: any[] }> {
 		const from = this.events.length;
 		const response = await this.send({ type: "prompt", message });
 		const disposition = response.data?.disposition as string | undefined;
 		if (response.success && disposition !== "handled") await this.waitFor((record) => record.type === "agent_settled", seconds, from, "agent_settled");
-		await new Promise((resolve) => setTimeout(resolve, 150)); // let trailing notices arrive
+		await this.drainTrailingNotices();
 		return { disposition, records: this.events.slice(from) };
+	}
+
+	private drainTrailingNotices(): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, 150));
 	}
 
 	notices(from = 0): { level: string; message: string }[] {
@@ -240,18 +213,14 @@ class Pi {
 
 interface Setup {
 	config?: object;
-	/** Pi's own settings.json, in the agent directory made for this run. */
 	settings?: object;
 	files?: Record<string, string>;
-	/** Load the extension by its path (-ne -e), or leave it to discovery in the agent directory. */
 	discover?: boolean;
 	more?: string[];
 	work?: string;
-	/** More environment for pi, and so for a detector it starts. */
 	env?: Record<string, string>;
 }
 
-/** The directories, environment and arguments for one run of pi that touches nothing of the user's. */
 function prepare(name: string, provider: Provider, setup: Setup = {}) {
 	const agent = join(root, `agent-${name}`);
 	const home = join(root, `home-${name}`);
@@ -296,7 +265,7 @@ function prepare(name: string, provider: Provider, setup: Setup = {}) {
 		"-ns", "-np", "-nc", "--no-mcp", "--no-themes", "--no-approve", "--offline",
 		"--session-dir", sessions,
 		...(setup.more ?? []),
-	]; // fmt: skip
+	];
 	return { args, env, work, agent, sessions };
 }
 
@@ -305,7 +274,6 @@ function startPi(name: string, provider: Provider, setup: Setup = {}) {
 	return { pi: new Pi(made.args, made.env, made.work), ...made };
 }
 
-/** pi's terminal UI, run under a tmux server of its own (no user configuration, the environment given here). */
 class Terminal {
 	private readonly server: string;
 	constructor(name: string, args: string[], env: Record<string, string>, cwd: string) {
@@ -317,7 +285,6 @@ class Terminal {
 	private tmux(...args: string[]) {
 		return spawnSync("tmux", ["-L", this.server, ...args], { encoding: "utf8" });
 	}
-	/** What is on the screen now, as text. */
 	screen(): string {
 		return this.tmux("capture-pane", "-p", "-J", "-t", "pi").stdout ?? "";
 	}
@@ -344,10 +311,7 @@ class Terminal {
 const socket = join(root, "d.sock");
 const masking = (more: object = {}) => ({ screenLocalModels: true, server: { socket, command: serveCommand, idleExit: 900, startTimeout: 120 }, ...more });
 
-// ----------------------------------------------------------------- scenarios
-
 const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
-	/** The main path: mask on the way out, real values in files and in what is stored. Starts the detector itself. */
 	async mask(provider) {
 		provider.play((body) => {
 			const all = JSON.stringify(body.messages);
@@ -380,9 +344,9 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 			const calls = stored.flatMap((message) => (message.role === "assistant" ? message.content.filter((part: any) => part.type === "toolCall") : []));
 			note(`stored tool-call arguments: ${short(calls.map((call: any) => call.arguments))}`);
 			const third = provider.requests[2]?.body;
-			const echoed = (third?.messages ?? []).filter((message: any) => message.role === "assistant").flatMap((message: any) => message.tool_calls ?? []).map((call: any) => call.function.arguments); // fmt: skip
+			const echoed = (third?.messages ?? []).filter((message: any) => message.role === "assistant").flatMap((message: any) => message.tool_calls ?? []).map((call: any) => call.function.arguments);
 			check("tool calls go back to the provider as it wrote them", JSON.stringify(echoed) === JSON.stringify(['{"path":"contact.txt","content":"<EMAIL_1>\\n"}', '{"command":"echo \\"token: <SECRET_1>\\" >> deploy.log"}']), short(echoed));
-			const streamed = pi.events.filter((record) => record.type === "message_end" && record.message?.role === "assistant").map((record) => textOf(record.message)).filter(Boolean); // fmt: skip
+			const streamed = pi.events.filter((record) => record.type === "message_end" && record.message?.role === "assistant").map((record) => textOf(record.message)).filter(Boolean);
 			note(`assistant text in message_end records (what a client of the event stream sees): ${short(streamed)}`);
 			const problems = pi.notices().filter((notice) => notice.level !== "info");
 			check("no warning or error was raised", problems.length === 0, short(problems));
@@ -399,17 +363,13 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** Continue the session of `mask` in a new process: the same placeholders, and old turns byte for byte. */
 	async resume(provider) {
 		const before = provider.requests.at(-1)?.body.messages.filter((message: any) => message.role === "assistant" || message.role === "tool");
 		const mark = provider.requests.length;
 		provider.play((body) => (isSummaryRequest(body) ? { text: "## Summary\nThe user saved <EMAIL_1> and logged <SECRET_1>; next comes <EMAIL_2>." } : { text: `Noted ${/<EMAIL_2>/.exec(JSON.stringify(body.messages))?.[0] ?? "nothing"}.` }));
-		// The detector that the first scenario started, reached through a listener that notes what it is asked.
 		const tap = await startTap(socket, "tap");
-		// Pi keeps the most recent turns out of a summary; with next to nothing kept, even this short session has something to compact.
 		const { pi } = startPi("mask", provider, { config: masking({ server: { socket: tap.socket, autoStart: false } }), more: ["-c"], settings: { compaction: { keepRecentTokens: 1 } } });
 		try {
-			// Nothing has been sent yet: the conversation that was resumed is checked while the user would still be typing.
 			for (const deadline = Date.now() + 30_000; tap.asked.length === 0 && Date.now() < deadline; ) await new Promise((resolve) => setTimeout(resolve, 100));
 			await new Promise((resolve) => setTimeout(resolve, 500));
 			const early = tap.asked.length;
@@ -427,7 +387,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 			const again = request?.messages.filter((message: any) => message.role === "assistant" || message.role === "tool").slice(0, before?.length);
 			check("earlier turns go out exactly as before the restart", before?.length > 0 && JSON.stringify(again) === JSON.stringify(before), `before: ${short(before, 700)}\nafter:  ${short(again, 700)}`);
 
-			// Compaction in the same process: the summary request must be masked, the stored summary real.
 			const compactFrom = provider.requests.length;
 			const response = await pi.send({ type: "compact", customInstructions: `Keep ${EMAIL} in mind` }, 180);
 			const summaryRequests = provider.requests.slice(compactFrom);
@@ -450,7 +409,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** No detector and no leave to start one: the message must not be sent. */
 	async door(provider) {
 		const { pi } = startPi("door", provider, { config: { screenLocalModels: true, server: { socket: join(root, "nobody.sock"), autoStart: false } } });
 		try {
@@ -473,7 +431,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** The detector dies while a tool runs: its result cannot be checked, so it must not be sent. */
 	async midrun(provider) {
 		const own = join(root, "own.sock");
 		const detector = spawn(opf, ["serve", "--checkpoint", checkpoint, "--no-download", "--socket", own, "--idle-exit", "300"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -504,7 +461,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** Report mode: nothing changes on the wire, and the screen says what it would have hidden. */
 	async report(provider) {
 		const quoting = "Fine. A template would have <EMAIL_1> there.";
 		provider.play(() => ({ text: quoting }));
@@ -527,7 +483,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** A value that would break out of a shell command, known from .env, used by the model in a command. */
 	async hostile(provider) {
 		provider.play((body) => {
 			const tools = toolMessages(body);
@@ -556,7 +511,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** A file that itself holds text shaped like a placeholder: it stays that text, and never turns into the value with that number. */
 	async literal(provider) {
 		provider.play((body) => {
 			const tools = toolMessages(body);
@@ -588,7 +542,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** A model on this machine is left alone by default, and the detector is not even started. */
 	async local(provider) {
 		provider.play(() => ({ text: "Local reply." }));
 		const lonely = join(root, "never.sock");
@@ -604,7 +557,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** What a person sees: the terminal UI under tmux, read off the screen. */
 	async tui(provider) {
 		const have = spawnSync("tmux", ["-V"], { encoding: "utf8" });
 		if (have.status !== 0) {
@@ -618,7 +570,7 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 			return { text: `Will mail ${/<EMAIL_\d+>/.exec(JSON.stringify(body.messages))?.[0] ?? "nobody"} today.`, pause: 2500 };
 		});
 		const mark = provider.requests.length;
-		const made = prepare("tui", provider, { config: masking(), discover: true, files: { "template.txt": "Dear <EMAIL_1>,\n" } }); // installed the way the user has it
+		const made = prepare("tui", provider, { config: masking(), discover: true, files: { "template.txt": "Dear <EMAIL_1>,\n" } });
 		const terminal = new Terminal("mask", made.args, made.env, made.work);
 		try {
 			const start = await terminal.waitFor((screen) => /privacy: mask/.test(screen), 60, "the footer to show the screen's state");
@@ -640,7 +592,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 			note(`the terminal UI after a masked exchange and /privacy:\n${state.trimEnd()}`);
 			void done;
 
-			// A file whose own text is "<EMAIL_1>": on screen it has to stay that text, while the reply streams and afterwards.
 			terminal.type("Show me the template file.");
 			terminal.enter();
 			const quoting = await terminal.waitFor((screen) => /It says:/.test(screen), 60, "the reply about the template");
@@ -672,7 +623,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/** Installed the way the user will have it: a symlink in the agent directory, found by discovery. */
 	async discovery(provider) {
 		provider.play(() => ({ text: "Fine." }));
 		const { pi } = startPi("discovery", provider, { config: masking(), discover: true });
@@ -686,11 +636,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 
-	/**
-	 * Installed by a link and with no command in the settings: the extension has to find `opf-mlx serve` itself,
-	 * from where its own files are, as pi's loader gives them to it. Only the socket is somewhere else than
-	 * the user's, and the checkpoint is named by the environment because this home has none.
-	 */
 	async defaults(provider) {
 		provider.play(() => ({ text: "Fine." }));
 		const own = join(root, "own.sock");
@@ -708,8 +653,6 @@ const scenarios: Record<string, (provider: Provider) => Promise<void>> = {
 		}
 	},
 };
-
-// ---------------------------------------------------------------------- main
 
 const wanted = process.argv.slice(2);
 const names = wanted.length > 0 ? wanted : Object.keys(scenarios);
@@ -734,11 +677,10 @@ try {
 } finally {
 	await provider.close();
 	if (process.env.E2E_DUMP) {
-		// What the pretend provider was sent, one file per request, to look at when a check fails.
 		mkdirSync(process.env.E2E_DUMP, { recursive: true });
 		provider.requests.forEach((request, index) => writeFileSync(join(process.env.E2E_DUMP!, `request-${String(index + 1).padStart(2, "0")}.json`), JSON.stringify(request.body, null, 2)));
 	}
-	spawnSync("pkill", ["-f", root]); // the detectors started here: their command lines carry this directory
+	spawnSync("pkill", ["-f", root]);
 	if (!process.env.E2E_KEEP) rmSync(root, { recursive: true, force: true });
 	else console.log(`\nkept: ${root}`);
 }
