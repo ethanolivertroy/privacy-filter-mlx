@@ -297,3 +297,7 @@ src/
   detector.ts     the client of opf-mlx serve config.ts    settings
 test/             unit tests, e2e/run.ts, mutations.py
 ```
+
+## License
+
+MIT, like the rest of this repository: see [LICENSE](../LICENSE).

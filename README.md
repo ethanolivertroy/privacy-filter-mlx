@@ -293,11 +293,12 @@ pi-privacy-screen/     the extension for the Pi coding agent (TypeScript, its ow
 
 ## License and credits
 
+The code in this repository is under the [MIT License](LICENSE).
+
 The model, its weights and the reference implementation are OpenAI's,
 published under the Apache License 2.0
 ([repository](https://github.com/openai/privacy-filter),
 [model card](https://huggingface.co/openai/privacy-filter)). The weights are
 not part of this repository: `opf-mlx download` fetches them from Hugging
-Face.
-
-No license has been chosen yet for the code in this repository.
+Face. `tests/golden/` holds outputs recorded from the original, for the
+tests.

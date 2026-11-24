@@ -2,6 +2,7 @@
   "name": "pi-privacy-screen",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Keeps secrets and personal data out of what the Pi coding agent sends to a model provider.",
   "type": "module",
   "pi": {
