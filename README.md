@@ -201,6 +201,8 @@ The full list is in
 - The extension is TypeScript that has never been type-checked.
 - It is new and has not been in daily use for any length of time.
 
+What is still undecided or not yet done is in [TODO.md](TODO.md).
+
 ## What it will not do quietly
 
 - **Truncate.** An input longer than the context window is split into
